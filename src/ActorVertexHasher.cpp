@@ -14,7 +14,7 @@ namespace Mus {
 			return;
 		if (IsGamePaused.load() && !IsRaceSexMenu.load())
 			return;
-		if (isDetecting.load())
+		if (detectionGate.Busy())
 			return;
 		if (lastTickTime + Config::GetSingleton().GetDetectTickMS() > currentTime)
 			return;
@@ -107,8 +107,11 @@ namespace Mus {
 
 	void ActorVertexHasher::CheckingActorHash()
 	{
-		if (actorHash.size() == 0)
-			return;
+        {
+            std::shared_lock lock(actorHashLock);
+            if (actorHash.empty())
+                return;
+        }
 		auto camera = RE::PlayerCamera::GetSingleton();
 		if (!camera)
 			return;
@@ -166,6 +169,9 @@ namespace Mus {
 
 		if (Config::GetSingleton().GetRealtimeDetectOnBackGround())
 		{
+            auto ticket = detectionGate.TryAcquire();
+            if (!ticket)
+                return;
 			if (Config::GetSingleton().GetActorVertexHasherTime1())
 				PerformanceLog(funcName, false, true);
 
@@ -174,8 +180,7 @@ namespace Mus {
                 blockActors.clear();
             }
 
-			backGroundWorkerThreads->submitAsync([&, actorHashFunc, funcName]() {
-				isDetecting.store(true);
+			backGroundWorkerThreads->submitAsync([this, actorHashFunc, funcName, ticket = std::move(ticket)]() {
 				{
                     std::lock_guard lg(actorHashLock);
                     for (auto it = actorHash.begin(); it != actorHash.end();)
@@ -193,7 +198,6 @@ namespace Mus {
                         PerformanceLog(funcName, true, true, actorHash.size());
                     logger::trace("Check hashes done {}", actorHash.size());
                 }
-				isDetecting.store(false);
 			});
 		}
 		else

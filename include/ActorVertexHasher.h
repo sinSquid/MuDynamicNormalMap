@@ -1,4 +1,5 @@
 #pragma once
+#include "AsyncWork.h"
 
 namespace Mus {
 	class ActorVertexHasher :
@@ -71,7 +72,7 @@ namespace Mus {
 		void CheckingActorHash();
 		bool GetHash(RE::Actor* a_actor, GeometryHash& hashMap);
 
-		std::atomic<bool> isDetecting = false;
+		SingleFlightGate detectionGate;
 
 		mutable std::shared_mutex blockActorsLock;
 		std::unordered_map<RE::FormID, bool> blockActors;

@@ -1,4 +1,5 @@
 #pragma once
+#include "AsyncWork.h"
 
 namespace Mus {
 	class TaskManager :
@@ -73,8 +74,8 @@ namespace Mus {
 
 		bool QUpdateNormalMap(RE::Actor* a_actor, bSlotbit bipedSlot = BipedObjectSlot::kAll);
 
-		bool QUpdateNormalMapImpl(RE::Actor* a_actor, GeometryList a_srcGeometies, bSlotbit bipedSlot);
-		void QUpdateNormalMapImpl(RE::FormID a_actorID, std::string a_actorName, GeometryDataPtr a_geoData, UpdateSet& a_updateSet);
+		bool QUpdateNormalMapImpl(RE::Actor* a_actor, bSlotbit bipedSlot);
+		void QUpdateNormalMapImpl(RE::FormID a_actorID, std::string a_actorName, GeometryDataPtr a_geoData, UpdateSet& a_updateSet, RE::NiPointer<RE::NiAVObject> sourceRoot);
 
 		void RunManageResource(bool isImminently);
 		bool RemoveNormalMap(RE::Actor* a_actor);
@@ -88,8 +89,7 @@ namespace Mus {
 		EventResult ProcessEvent(const RE::MenuOpenCloseEvent* evn, RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override;
 
 	private:
-		std::vector<std::function<void()>> delayTask; //task;
-		std::mutex delayTaskLock;
+		FrameTaskQueue delayTasks;
 
 		bool isPressedHotKey1 = false;
 		bool isResetTasks = false;

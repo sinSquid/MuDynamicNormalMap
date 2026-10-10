@@ -533,6 +533,14 @@ FodyWeavers.xsd
 
 build/
 
+# Local toolchains, deployment packages and inspection output
+/build-tools/
+/outputs/
+/shader/Compiled/
+/build-dll-check.txt
+/original-dll-check.txt
+/tests/package_v2.py
+
 contrib/Distribution/**/*.dll
 contrib/Distribution/**/*.pdb
 contrib/Distribution/**/*.pex

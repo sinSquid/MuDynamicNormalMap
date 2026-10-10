@@ -18,6 +18,10 @@ file(GLOB OPENVR_FILES "${SOURCE_PATH2}/*")
 
 file(COPY ${OPENVR_FILES} DESTINATION "${SOURCE_PATH}/extern/openvr")
 
+vcpkg_find_acquire_program(GIT)
+get_filename_component(GIT_DIR "${GIT}" DIRECTORY)
+vcpkg_add_to_path("${GIT_DIR}")
+
 vcpkg_configure_cmake(
     SOURCE_PATH "${SOURCE_PATH}"
     PREFER_NINJA

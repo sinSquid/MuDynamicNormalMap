@@ -107,8 +107,9 @@ namespace Mus {
                     RE::Actor* actor = GetFormByID<RE::Actor*>(it->first);
                     if (IsInvalidActor(actor))
                     {
+                        const auto actorID = it->first;
                         it = isActiveActors.erase(it);
-                        RemoveLastNormalMap(it->first);
+                        RemoveLastNormalMap(actorID);
                         continue;
                     }
 					if (IsPlayer(actor->formID))
@@ -164,16 +165,18 @@ namespace Mus {
             updateSlotQueue_ = std::move(updateSlotQueue);
         }
 
-        tbb::parallel_for_each(
-			updateSlotQueue_, [&] (auto& map){
+        // Scene graph reads, material updates and NiTexture cache access must
+        // stay on the engine frame thread. Only copied geometry processing is async.
+        for (auto& map : updateSlotQueue_)
+        {
                 RE::Actor* actor = GetFormByID<RE::Actor*>(map.first);
                 if (IsInvalidActor(actor))
-                    return;
+                    continue;
                 if (GetIsActiveActor(actor->formID))
                 {
                     if (!GetIsUpdating(actor->formID))
                     {
-                        QUpdateNormalMapImpl(actor, GetAllGeometries(actor), map.second);
+                        QUpdateNormalMapImpl(actor, map.second);
                     }
                     else
                     {
@@ -181,8 +184,7 @@ namespace Mus {
                         updateSlotQueue[actor->formID] |= map.second;
                     }
                 }
-			}
-		);
+        }
 
         if (isAfterLoading)
         {
@@ -200,42 +202,28 @@ namespace Mus {
 
 	void TaskManager::RunDelayTask()
 	{
-		if (delayTask.empty())
+		auto delayTask_ = delayTasks.TakeReady();
+		if (delayTask_.empty())
 			return;
 
 		if (Config::GetSingleton().GetQueueTime())
 			PerformanceLog(std::string(__func__), false, false);
 
-		std::vector<std::function<void()>> delayTask_;
-		{
-            std::lock_guard lg(delayTaskLock);
-            delayTask_ = std::move(delayTask);
-		}
-        tbb::parallel_for(
-            tbb::blocked_range<std::size_t>(0, delayTask_.size()),
-            [&](const tbb::blocked_range<std::size_t>& r) {
-                for (std::size_t i = r.begin(); i != r.end(); ++i)
-                {
-                    delayTask_[i]();
-                }
-            },
-            tbb::auto_partitioner()
-		);
+        // These callbacks include live material writes. Parallel execution here
+        // raced the renderer and the shared NiSourceTexture cache.
+        for (auto& task : delayTask_)
+            task();
 
 		if (Config::GetSingleton().GetQueueTime())
 			PerformanceLog(std::string(__func__), true, false, delayTask_.size());
 	}
 	void TaskManager::RegisterDelayTask(std::function<void()> func) 
 	{
-		std::lock_guard<std::mutex> lg(delayTaskLock);
-		delayTask.push_back(func);
+		delayTasks.Enqueue(0, std::move(func));
 	}
 	void TaskManager::RegisterDelayTask(std::int16_t delayTick, std::function<void()> func) 
 	{
-		if (delayTick <= 0)
-			RegisterDelayTask(func);
-		else
-			RegisterDelayTask([=]() { RegisterDelayTask(delayTick - 1, func); });
+		delayTasks.Enqueue(delayTick, std::move(func));
 	}
 
 	void TaskManager::RunManageResource(bool isImminently)
@@ -302,20 +290,21 @@ namespace Mus {
         return true;
     }
 
-	bool TaskManager::QUpdateNormalMapImpl(RE::Actor* a_actor, GeometryList a_srcGeometies, bSlotbit bipedSlot)
+	bool TaskManager::QUpdateNormalMapImpl(RE::Actor* a_actor, bSlotbit bipedSlot)
 	{
 		if (!a_actor || bipedSlot == 0)
 			return false;
 
+        auto condition = ConditionManager::GetSingleton().GetCondition(a_actor);
+        if (!condition.Enable)
+            return true;
+
+        auto a_srcGeometies = GetAllGeometries(a_actor);
 		if (a_srcGeometies.empty())
 		{
 			logger::error("{}::{:x}::{} : no valid geometry found", __func__, a_actor->formID, a_actor->GetName());
 			return false;
 		}
-
-		auto condition = ConditionManager::GetSingleton().GetCondition(a_actor);
-		if (!condition.Enable)
-			return true;
 
 		logger::debug("{}::{:x}::{} : get geometry datas...", __func__, a_actor->formID, a_actor->GetName());
 		RE::FormID id = a_actor->formID;
@@ -410,16 +399,16 @@ namespace Mus {
 			}
         }
 
-		QUpdateNormalMapImpl(a_actor->formID, actorName, newGeometryData, newUpdateSet);
+		QUpdateNormalMapImpl(a_actor->formID, actorName, newGeometryData, newUpdateSet, a_actor->loadedData->data3D);
 		return true;
 	}
-	void TaskManager::QUpdateNormalMapImpl(RE::FormID a_actorID, std::string a_actorName, GeometryDataPtr a_geoData, UpdateSet& a_updateSet)
+	void TaskManager::QUpdateNormalMapImpl(RE::FormID a_actorID, std::string a_actorName, GeometryDataPtr a_geoData, UpdateSet& a_updateSet, RE::NiPointer<RE::NiAVObject> sourceRoot)
 	{
         if (!a_geoData || a_updateSet.empty() || GetIsUpdating(a_actorID))
 			return;
 
 		SetIsUpdating(a_actorID, true);
-        auto func = [this, a_actorID, a_actorName, a_geoData, a_updateSet = std::move(a_updateSet)]() mutable {
+        auto func = [this, a_actorID, a_actorName, a_geoData, sourceRoot, a_updateSet = std::move(a_updateSet)]() mutable {
             if (Config::GetSingleton().GetFullUpdateTime())
                 PerformanceLog(std::string("QUpdateNormalMapImpl") + "::" + SetHex(a_actorID, false), false, false);
 
@@ -442,7 +431,7 @@ namespace Mus {
                 return;
             }
 
-            RegisterDelayTask([this, a_actorID, a_actorName, textures = std::move(textures)]() {
+            RegisterDelayTask([this, a_actorID, a_actorName, sourceRoot, textures = std::move(textures)]() {
                 auto actor = GetFormByID<RE::Actor*>(a_actorID);
                 if (IsInvalidActor(actor))
                 {
@@ -452,6 +441,14 @@ namespace Mus {
                 }
 
                 auto root = actor->loadedData->data3D.get();
+                if (root != sourceRoot.get())
+                {
+                    // A load or 3D rebuild replaced the graph while work was in flight.
+                    // Retain the current materials and request fresh data next frame.
+                    SetIsUpdating(a_actorID, false);
+                    QUpdateNormalMap(actor, BipedObjectSlot::kAll);
+                    return;
+                }
                 std::unordered_map<std::string, RE::NiSourceTexturePtr> createdTextures;
                 RE::BSVisit::TraverseScenegraphGeometries(root, [&](RE::BSGeometry* geo) -> RE::BSVisit::BSVisitControl {
                     using Feature = RE::BSShaderMaterial::Feature;
@@ -549,7 +546,7 @@ namespace Mus {
                     }
                     else
                     {
-                        if (Shader::TextureLoadManager::GetSingleton().CreateNiTexture(found->textureName, found->texture->normalmapTexture2D, found->texture->normalmapShaderResourceView, normalmap) < 0)
+                        if (Shader::TextureLoadManager::GetSingleton().CreateNiTexture(found->textureName, found->texture->normalmapTexture2D, found->texture->normalmapShaderResourceView, normalmap) < 0 || !normalmap || !normalmap->rendererTexture || !normalmap->rendererTexture->texture || !normalmap->rendererTexture->resourceView)
                         {
                             logger::error("{:x}::{}::{} : Failed to create NiTexture", a_actorID, a_actorName, geo->name.c_str());
                             return RE::BSVisit::BSVisitControl::kContinue;

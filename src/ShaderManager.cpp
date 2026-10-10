@@ -680,14 +680,16 @@ namespace Mus {
 
 		std::int8_t TextureLoadManager::CreateNiTexture(const std::string& name, Microsoft::WRL::ComPtr<ID3D11Texture2D> dstTex, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> dstSRV, RE::NiPointer<RE::NiSourceTexture>& output)
 		{
+			if (!dstTex || !dstSRV)
+				return -1;
 			RE::NiPointer<RE::NiSourceTexture> newTexture;
 			auto result = TextureLoadManager::CreateSourceTexture(name, newTexture);
 			if (result == -1 || !newTexture)
 			{
 				logger::critical("Failed to create NiTexture");
-				return result;
+				return -1;
 			}
-			else if (result == 0)
+			else if (result == 0 && newTexture->rendererTexture)
 			{
 				auto oldTexture = newTexture->rendererTexture->texture;
 				auto oldResource = newTexture->rendererTexture->resourceView;
@@ -698,7 +700,7 @@ namespace Mus {
 				if (oldResource)
 					oldResource->Release();
 			}
-			else if (result == 1)
+			else
 			{
 				RE::BSGraphics::Texture* newRendererTexture = new RE::BSGraphics::Texture();
 				newRendererTexture->texture = reinterpret_cast<REX::W32::ID3D11Texture2D*>(dstTex.Detach());
