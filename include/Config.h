@@ -37,234 +37,234 @@ namespace Mus {
 
         //Debug
         [[nodiscard]] inline spdlog::level::level_enum GetLogLevel() const noexcept {
-            return logLevel;
+            return static_cast<spdlog::level::level_enum>(GetRuntimeTuning()->logLevel);
         }
         [[nodiscard]] inline spdlog::level::level_enum GetFlushLevel() const noexcept {
-            return flushLevel;
+            return static_cast<spdlog::level::level_enum>(GetRuntimeTuning()->flushLevel);
         }
         [[nodiscard]] inline auto GetDebugTexture() const noexcept {
-            return DebugTexture;
+            return GetRuntimeTuning()->DebugTexture;
         }
         [[nodiscard]] inline auto GetTickTimeToRealFPS() const noexcept {
-            return TickTimeToRealFPS;
+            return GetRuntimeTuning()->TickTimeToRealFPS;
         }
         [[nodiscard]] inline auto GetQueueTime() const noexcept {
-            return QueueTime;
+            return GetRuntimeTuning()->QueueTime;
         }
         [[nodiscard]] inline auto GetFullUpdateTime() const noexcept {
-            return FullUpdateTime;
+            return GetRuntimeTuning()->FullUpdateTime;
         }
         [[nodiscard]] inline auto GetActorVertexHasherTime1() const noexcept {
-            return ActorVertexHasherTime1;
+            return GetRuntimeTuning()->ActorVertexHasherTime1;
         }
         [[nodiscard]] inline auto GetActorVertexHasherTime2() const noexcept {
-            return ActorVertexHasherTime2;
+            return GetRuntimeTuning()->ActorVertexHasherTime2;
         }
         [[nodiscard]] inline auto GetGeometryDataTime() const noexcept {
-            return GeometryDataTime;
+            return GetRuntimeTuning()->GeometryDataTime;
         }
         [[nodiscard]] inline auto GetUpdateNormalMapTime1() const noexcept {
-            return UpdateNormalMapTime1;
+            return GetRuntimeTuning()->UpdateNormalMapTime1;
         }
         [[nodiscard]] inline auto GetUpdateNormalMapTime2() const noexcept {
-            return UpdateNormalMapTime2;
+            return GetRuntimeTuning()->UpdateNormalMapTime2;
         }
         [[nodiscard]] inline auto GetMergeTime() const noexcept {
-            return MergeTime;
+            return GetRuntimeTuning()->MergeTime;
         }
         [[nodiscard]] inline auto GetGenerateMipsTime() const noexcept {
-            return GenerateMipsTime;
+            return GetRuntimeTuning()->GenerateMipsTime;
         }
         [[nodiscard]] inline auto GetBleedTextureTime1() const noexcept {
-            return BleedTextureTime1;
+            return GetRuntimeTuning()->BleedTextureTime1;
         }
         [[nodiscard]] inline auto GetBleedTextureTime2() const noexcept {
-            return BleedTextureTime2;
+            return GetRuntimeTuning()->BleedTextureTime2;
         }
         [[nodiscard]] inline auto GetCompressTime() const noexcept {
-            return CompressTime;
+            return GetRuntimeTuning()->CompressTime;
         }
         [[nodiscard]] inline auto GetTextureCopyTime() const noexcept {
-            return TextureCopyTime;
+            return GetRuntimeTuning()->TextureCopyTime;
         }
 
         //General
         [[nodiscard]] inline auto GetPlayerEnable() const noexcept {
-            return PlayerEnable;
+            return GetRuntimeTuning()->PlayerEnable;
         }
         [[nodiscard]] inline auto GetNPCEnable() const noexcept {
-            return NPCEnable;
+            return GetRuntimeTuning()->NPCEnable;
         }
         [[nodiscard]] inline auto GetMaleEnable() const noexcept {
-            return MaleEnable;
+            return GetRuntimeTuning()->MaleEnable;
         }
         [[nodiscard]] inline auto GetFemaleEnable() const noexcept {
-            return FemaleEnable;
+            return GetRuntimeTuning()->FemaleEnable;
         }
         [[nodiscard]] inline auto GetHeadEnable() const noexcept {
-            return HeadEnable;
+            return GetRuntimeTuning()->HeadEnable;
         }
 
         [[nodiscard]] inline auto GetHotKey1() const noexcept {
-            return HotKey1;
+            return static_cast<std::uint32_t>(GetRuntimeTuning()->HotKey1);
         }
         [[nodiscard]] inline auto GetHotKey2() const noexcept {
-            return HotKey2;
+            return static_cast<std::uint32_t>(GetRuntimeTuning()->HotKey2);
         }
 
         [[nodiscard]] inline auto GetUseConsoleRef() const noexcept {
-            return UseConsoleRef;
+            return GetRuntimeTuning()->UseConsoleRef;
         }
 
         [[nodiscard]] inline auto GetRevertNormalMap() const noexcept {
-            return RevertNormalMap;
+            return GetRuntimeTuning()->RevertNormalMap;
         }
         [[nodiscard]] inline auto GetUpdateDelayTick() const noexcept {
             return static_cast<std::uint8_t>(GetRuntimeTuning()->updateDelayTick);
         }
 
         [[nodiscard]] inline auto GetApplyOverlay() const noexcept {
-            return ApplyOverlay;
+            return GetRuntimeTuning()->ApplyOverlay;
         }
 
         [[nodiscard]] inline auto GetRemoveSkinOverrides() const noexcept {
-            return RemoveSkinOverrides;
+            return GetRuntimeTuning()->RemoveSkinOverrides;
         }
         [[nodiscard]] inline auto GetRemoveNodeOverrides() const noexcept {
-            return RemoveNodeOverrides;
+            return GetRuntimeTuning()->RemoveNodeOverrides;
         }
 
         //Geometry
         [[nodiscard]] inline auto GetWeldDistance() const noexcept {
-            return WeldDistance;
+            return GetRuntimeTuning()->WeldDistance;
         }
         [[nodiscard]] inline auto GetBoundaryWeldDistance() const noexcept {
-            return BoundaryWeldDistance;
+            return GetRuntimeTuning()->BoundaryWeldDistance;
         }
         [[nodiscard]] inline auto GetWeldAccuracy() const noexcept {
-            return WeldAccuracy;
+            return GetRuntimeTuning()->WeldAccuracy;
         }
         [[nodiscard]] inline auto GetNormalSmoothDegree() const noexcept {
-            return NormalSmoothDegree;
+            return GetRuntimeTuning()->NormalSmoothDegree;
         }
         [[nodiscard]] inline auto GetAllowInvertNormalSmooth() const noexcept {
-            return AllowInvertNormalSmooth;
+            return GetRuntimeTuning()->AllowInvertNormalSmooth;
         }
         [[nodiscard]] inline auto GetSubdivision() const noexcept {
-            return Subdivision;
+            return static_cast<std::uint8_t>(GetRuntimeTuning()->Subdivision);
         }
         [[nodiscard]] inline auto GetSubdivisionTriThreshold() const noexcept {
-            return SubdivisionTriThreshold;
+            return static_cast<std::uint32_t>(GetRuntimeTuning()->SubdivisionTriThreshold);
         }
         [[nodiscard]] inline auto GetSubdivisionVertexSmooth() const noexcept {
-            return SubdivisionVertexSmooth;
+            return static_cast<std::uint8_t>(GetRuntimeTuning()->SubdivisionVertexSmooth);
         }
         [[nodiscard]] inline auto GetSubdivisionVertexSmoothStrength() const noexcept {
-            return SubdivisionVertexSmoothStrength;
+            return GetRuntimeTuning()->SubdivisionVertexSmoothStrength;
         }
         [[nodiscard]] inline auto GetVertexSmooth() const noexcept {
-            return VertexSmooth;
+            return static_cast<std::uint8_t>(GetRuntimeTuning()->VertexSmooth);
         }
         [[nodiscard]] inline auto GetVertexSmoothStrength() const noexcept {
-            return VertexSmoothStrength;
+            return GetRuntimeTuning()->VertexSmoothStrength;
         }
         [[nodiscard]] inline auto GetVertexSmoothByAngle() const noexcept {
-            return VertexSmoothByAngle;
+            return static_cast<std::uint8_t>(GetRuntimeTuning()->VertexSmoothByAngle);
         }
         [[nodiscard]] inline auto GetVertexSmoothByAngleThreshold1() const noexcept {
-            return VertexSmoothByAngleThreshold1;
+            return GetRuntimeTuning()->VertexSmoothByAngleThreshold1;
         }
         [[nodiscard]] inline auto GetVertexSmoothByAngleThreshold2() const noexcept {
-            return VertexSmoothByAngleThreshold2;
+            return GetRuntimeTuning()->VertexSmoothByAngleThreshold2;
         }
 
         //Texture
         [[nodiscard]] inline auto GetTextureWidth() const noexcept {
-            return TextureWidth;
+            return static_cast<std::uint32_t>(GetRuntimeTuning()->TextureWidth);
         }
         [[nodiscard]] inline auto GetTextureHeight() const noexcept {
-            return TextureHeight;
+            return static_cast<std::uint32_t>(GetRuntimeTuning()->TextureHeight);
         }
         [[nodiscard]] inline auto GetTangentZCorrection() const noexcept {
-            return TangentZCorrection;
+            return GetRuntimeTuning()->TangentZCorrection;
         }
         [[nodiscard]] inline auto GetDetailStrength() const noexcept {
-            return DetailStrength;
+            return GetRuntimeTuning()->DetailStrength;
         }
         [[nodiscard]] inline auto GetIgnoreMissingNormalMap() const noexcept {
-            return IgnoreMissingNormalMap;
+            return GetRuntimeTuning()->IgnoreMissingNormalMap;
         }
 
         //Performance
         [[nodiscard]] inline auto GetGPUEnable() const noexcept {
-            return GPUEnable;
+            return GetRuntimeTuning()->GPUEnable;
         }
         [[nodiscard]] inline auto GetGPUDeviceIndex() const noexcept {
-            return GPUDeviceIndex;
+            return static_cast<std::int32_t>(GetRuntimeTuning()->GPUDeviceIndex);
         }
         [[nodiscard]] inline auto GetGPUForceSync() const noexcept {
-            return GPUForceSync;
+            return GetRuntimeTuning()->GPUForceSync;
         }
         [[nodiscard]] inline auto GetUpdateDistance() const noexcept {
             const auto values = GetRuntimeTuning();
             return values->updateDistance * values->updateDistance;
         }
         [[nodiscard]] inline auto GetUpdateDistanceVramSave() const noexcept {
-            return UpdateDistanceVramSave;
+            return GetRuntimeTuning()->UpdateDistanceVramSave;
         }
         [[nodiscard]] inline auto GetUseMipMap() const noexcept {
-            return UseMipMap;
+            return GetRuntimeTuning()->UseMipMap;
         }
 
         [[nodiscard]] inline auto GetAutoTaskQ() const noexcept {
-            return AutoTaskQ;
+            return static_cast<std::uint8_t>(GetRuntimeTuning()->AutoTaskQ);
         }
         [[nodiscard]] inline auto GetTaskQTickMS() const noexcept {
-            return TaskQTickMS;
+            return static_cast<std::clock_t>(GetRuntimeTuning()->TaskQTickMS);
         }
         [[nodiscard]] inline auto GetEcoreUse() const noexcept {
-            return EcoreUse;
+            return GetRuntimeTuning()->EcoreUse;
         }
         [[nodiscard]] inline auto GetProcessingInLoading() const noexcept {
-            return ProcessingInLoading;
+            return GetRuntimeTuning()->ProcessingInLoading;
         }
         [[nodiscard]] inline auto GetProcessingInLoadingWithMainGPU() const noexcept {
-            return ProcessingInLoadingWithMainGPU;
+            return GetRuntimeTuning()->ProcessingInLoadingWithMainGPU;
         }
         [[nodiscard]] inline auto GetTextureCompress() const noexcept {
-            return TextureCompress;
+            return static_cast<std::int8_t>(GetRuntimeTuning()->TextureCompress);
         }
         [[nodiscard]] inline auto GetTextureCompressQuality() const noexcept {
-            return TextureCompressQuality;
+            return static_cast<std::uint8_t>(GetRuntimeTuning()->TextureCompressQuality);
         }
         [[nodiscard]] inline auto GetSIMDtype() const noexcept {
-            return SIMDtype;
+            return static_cast<std::int8_t>(GetRuntimeTuning()->SIMDtype);
         }
         [[nodiscard]] inline auto GetDiskCache() const noexcept {
-            return DiskCache;
+            return GetRuntimeTuning()->DiskCache;
         }
         [[nodiscard]] inline auto GetDiskCacheFolder() const noexcept {
-            return DiskCacheFolder;
+            return GetRuntimeTuning()->DiskCacheFolder;
         }
         [[nodiscard]] inline auto GetDiskCacheLimitMB() const noexcept {
-            return DiskCacheLimitMB;
+            return static_cast<std::uint32_t>(GetRuntimeTuning()->DiskCacheLimitMB);
         }
         [[nodiscard]] inline auto GetClearDiskCache() const noexcept {
-            return ClearDiskCache;
+            return GetRuntimeTuning()->ClearDiskCache;
         }
         [[nodiscard]] inline auto GetDiskCacheHashPrecision() const noexcept {
-            return DiskCacheHashPrecision;
+            return std::ldexp(1.0f, GetRuntimeTuning()->DiskCacheHashPrecision);
         }
 
         //RealtimeDetect
         [[nodiscard]] inline auto GetRealtimeDetect() const noexcept {
-            return RealtimeDetect;
+            return GetRuntimeTuning()->RealtimeDetect;
         }
         [[nodiscard]] inline auto GetRealtimeDetectHead() const noexcept {
-            return RealtimeDetectHead;
+            return static_cast<std::uint8_t>(GetRuntimeTuning()->RealtimeDetectHead);
         }
         [[nodiscard]] inline auto GetRealtimeDetectOnBackGround() const noexcept {
-            return RealtimeDetectOnBackGround;
+            return GetRuntimeTuning()->RealtimeDetectOnBackGround;
         }
         [[nodiscard]] inline auto GetDetectDistance() const noexcept {
             const auto values = GetRuntimeTuning();
@@ -274,98 +274,10 @@ namespace Mus {
             return static_cast<std::clock_t>(GetRuntimeTuning()->detectTickMS);
         }
         [[nodiscard]] inline auto GetDetectTextureChange() const noexcept {
-            return DetectTextureChange;
+            return GetRuntimeTuning()->DetectTextureChange;
         }
     protected:
         RuntimeTuningStore runtimeTuning;
-        //Debug
-        spdlog::level::level_enum logLevel{ spdlog::level::level_enum::info };
-        spdlog::level::level_enum flushLevel{ spdlog::level::level_enum::trace };
-        bool DebugTexture = false;
-        bool TickTimeToRealFPS = false;
-        bool QueueTime = false;
-        bool FullUpdateTime = false;
-        bool ActorVertexHasherTime1 = false;
-        bool ActorVertexHasherTime2 = false;
-        bool GeometryDataTime = false;
-        bool UpdateNormalMapTime1 = false;
-        bool UpdateNormalMapTime2 = false;
-        bool MergeTime = false;
-        bool GenerateMipsTime = false;
-        bool BleedTextureTime1 = false;
-        bool BleedTextureTime2 = false;
-        bool CompressTime = false;
-        bool TextureCopyTime = false;
-
-        //General
-        bool PlayerEnable = true;
-        bool NPCEnable = true;
-        bool MaleEnable = true;
-        bool FemaleEnable = true;
-        bool HeadEnable = false;
-
-        std::uint32_t HotKey1 = 0;
-        std::uint32_t HotKey2 = 43;
-
-        bool UseConsoleRef = true;
-
-        bool RevertNormalMap = false;
-
-        bool ApplyOverlay = true;
-
-        bool RemoveSkinOverrides = true;
-        bool RemoveNodeOverrides = true;
-
-        //Geometry
-        float WeldDistance = 0.02f;
-        float BoundaryWeldDistance = 0.02f;
-        bool WeldAccuracy = true;
-        float NormalSmoothDegree = 60.0f;
-        bool AllowInvertNormalSmooth = false;
-        std::uint8_t Subdivision = 0;
-        std::uint32_t SubdivisionTriThreshold = 65535;
-        std::uint8_t SubdivisionVertexSmooth = 1;
-        float SubdivisionVertexSmoothStrength = 0.5f;
-        std::uint8_t VertexSmooth = 0;
-        float VertexSmoothStrength = 0.5f;
-        std::uint8_t VertexSmoothByAngle = 0;
-        float VertexSmoothByAngleThreshold1 = 45.0f;
-        float VertexSmoothByAngleThreshold2 = 60.0f;
-
-        //Texture
-        std::uint32_t TextureWidth = 2048;
-        std::uint32_t TextureHeight = 2048;
-        bool TangentZCorrection = true;
-        float DetailStrength = 0.5f;
-        bool IgnoreMissingNormalMap = true;
-
-        //Performance
-        bool GPUEnable = true;
-        std::int32_t GPUDeviceIndex = -1;
-        bool GPUForceSync = false;
-        bool UpdateDistanceVramSave = false;
-		bool UseMipMap = true;
-
-        std::uint8_t AutoTaskQ = AutoTaskQList::Balanced;
-        bool EcoreUse = false;
-        bool ProcessingInLoading = false;
-        bool ProcessingInLoadingWithMainGPU = true;
-        std::clock_t TaskQTickMS = 100;
-        std::int8_t TextureCompress = 1; //-1 auto compress, 0 no compress, 1 cpu bc7, 2 gpu bc7
-        std::uint8_t TextureCompressQuality = 1;
-        std::int8_t SIMDtype = SIMDType::avx;
-        bool DiskCache = true;
-        std::string DiskCacheFolder = "Data\\SKSE\\Plugins\\MuDynamicNormalMap\\DiskCache";
-        std::uint32_t DiskCacheLimitMB = 500;
-        bool ClearDiskCache = true;
-        float DiskCacheHashPrecision = 1 << 9;
-
-        //RealtimeDetect
-        bool RealtimeDetect = true;
-        std::uint8_t RealtimeDetectHead = 1; //0 disable, 1 morph data only, all data
-        bool RealtimeDetectOnBackGround = false;
-        bool DetectTextureChange = true;
-
     public:
         inline std::string getCurrentSettingValue(std::string s)
         {

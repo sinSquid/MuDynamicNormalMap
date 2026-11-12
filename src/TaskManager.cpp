@@ -1,7 +1,166 @@
 #include "TaskManager.h"
+#include "SettingsCatalog.h"
 
 namespace Mus {
+    bool TaskManager::IsActorEnabled(RE::Actor* actor) const {
+        if (!actor) return false;
+        const auto tuning = Config::GetSingleton().GetRuntimeTuning();
+        if (IsPlayer(actor->formID) ? !tuning->PlayerEnable : !tuning->NPCEnable) return false;
+        const auto sex = GetSex(actor);
+        return !(sex == RE::SEX::kMale && !tuning->MaleEnable) &&
+               !(sex == RE::SEX::kFemale && !tuning->FemaleEnable);
+    }
+    void TaskManager::QueueMenuApply(const RuntimeTuning& tuning, MenuApplyCompletion completion) {
+        if (stoppingComputations.load() || pendingMenuApply) {
+            completion(false, "已有配置正在应用，或游戏正在退出。");
+            return;
+        }
+        RuntimeTuning normalized;
+        std::string error;
+        if (!NormalizeRuntimeTuning(tuning, normalized, error)) {
+            completion(false, error);
+            return;
+        }
+        pendingMenuApply = MenuApplyRequest{std::move(normalized), std::move(completion), std::chrono::steady_clock::now()};
+        ActorVertexHasher::GetSingleton().PauseForMenuApply(true);
+    }
+
+    void TaskManager::FinishMenuApply(bool success, const std::string& status) {
+        if (!pendingMenuApply) return;
+        auto completion = std::move(pendingMenuApply->completion);
+        pendingMenuApply.reset();
+        ActorVertexHasher::GetSingleton().PauseForMenuApply(false);
+        if (completion) completion(success, status);
+    }
+
+    void TaskManager::RefreshRegisteredActors() {
+        std::vector<RE::FormID> actors;
+        {
+            std::shared_lock lock(isActiveActorsLock);
+            actors.reserve(isActiveActors.size());
+            for (const auto& [id, active] : isActiveActors) actors.push_back(id);
+        }
+        { std::lock_guard lock(updateSlotQueueLock); updateSlotQueue.clear(); }
+        ActorVertexHasher::GetSingleton().ResetRegistrations();
+        geometryRetry.Clear();
+        for (const auto id : actors) {
+            auto actor = GetFormByID<RE::Actor*>(id);
+            if (IsInvalidActor(actor)) continue;
+            // Restore first so disabled actors and excluded body parts do not retain old maps.
+            RemoveNormalMap(actor);
+            QUpdateNormalMap(actor, BipedObjectSlot::kAll);
+        }
+    }
+
+    void TaskManager::ProcessMenuApply() {
+        if (!pendingMenuApply || menuApplyScheduled) return;
+        if (std::chrono::steady_clock::now() - pendingMenuApply->queuedAt > std::chrono::seconds(30)) {
+            FinishMenuApply(false, "等待当前法线任务结束超时；配置未应用，请稍后重试。");
+            return;
+        }
+        auto& updater = ObjectNormalMapUpdater::GetSingleton();
+        if (HasPendingUpdates() || ActorVertexHasher::GetSingleton().HasPendingDetection() ||
+            updater.GetCount() > 0 || updater.HasPendingCleanup() ||
+            NormalMapStore::GetSingleton().HasPendingDiskWrites()) return;
+
+        // Frame dispatch holds the event registry's reader lock. Pool recreation
+        // registers/unregisters listeners, so commit from a separate SKSE main task.
+        const auto tasks = SKSE::GetTaskInterface();
+        if (!tasks) { FinishMenuApply(false, "主线程任务接口不可用。"); return; }
+        menuApplyScheduled = true;
+        const auto alive = menuApplyAlive;
+        try {
+            tasks->AddTask([this, alive] { if (alive->load()) ExecuteMenuApply(); });
+        } catch (const std::exception& e) {
+            menuApplyScheduled = false;
+            FinishMenuApply(false, e.what());
+        }
+    }
+
+    void TaskManager::ExecuteMenuApply() {
+        menuApplyScheduled = false;
+        if (!pendingMenuApply || stoppingComputations.load()) return;
+        if (std::chrono::steady_clock::now() - pendingMenuApply->queuedAt > std::chrono::seconds(30)) {
+            FinishMenuApply(false, "主线程调度已超时，配置未应用，请重试。");
+            return;
+        }
+        auto& updater = ObjectNormalMapUpdater::GetSingleton();
+        if (HasPendingUpdates() || ActorVertexHasher::GetSingleton().HasPendingDetection() ||
+            updater.GetCount() > 0 || updater.HasPendingCleanup() ||
+            NormalMapStore::GetSingleton().HasPendingDiskWrites()) return;
+
+        const auto before = Config::GetSingleton().GetRuntimeTuning();
+        auto desired = *before;
+        for (const auto& setting : GetMenuSettingsCatalog())
+            setting.assign(desired, setting.read(pendingMenuApply->tuning));
+        bool reconfigure = false, regenerate = false;
+        std::size_t appliedCount = 0, restartCount = 0;
+        for (const auto& setting : GetSettingsCatalog()) {
+            if (setting.read(*before) == setting.read(desired)) continue;
+            if (setting.policy == ApplyPolicy::Restart) ++restartCount;
+            else {
+                ++appliedCount;
+                reconfigure |= setting.policy == ApplyPolicy::IdleReconfigure;
+                regenerate |= setting.policy == ApplyPolicy::Regenerate;
+            }
+        }
+        CopyRestartFields(*before, desired);
+        std::string error;
+        try {
+            if (!Config::GetSingleton().ApplyRuntimeTuning(desired, error)) {
+                FinishMenuApply(false, error);
+                return;
+            }
+            spdlog::set_level(Config::GetSingleton().GetLogLevel());
+            spdlog::flush_on(Config::GetSingleton().GetFlushLevel());
+            if (reconfigure || regenerate) {
+                // GeometryProcessing reads these derived thresholds directly.
+                weldDistance = std::max(floatPrecision, Config::GetSingleton().GetWeldDistance());
+                weldDistanceMult = 1.0f / weldDistance;
+                boundaryWeldDistance = std::max(floatPrecision, Config::GetSingleton().GetBoundaryWeldDistance());
+                boundaryWeldDistanceMult = 1.0f / boundaryWeldDistance;
+                if (reconfigure) InitialSetting();
+                ConditionManager::GetSingleton().InitialConditionList();
+                static_cast<MultipleConfig*>(&Config::GetSingleton())->LoadConditionFile();
+                ConditionManager::GetSingleton().SortConditions();
+                if (regenerate && !updater.Init()) {
+                    throw std::runtime_error("无法重新建立法线生成资源");
+                }
+                if (regenerate) RefreshRegisteredActors();
+            }
+            if (desired.HotKey1 != before->HotKey1 || desired.HotKey2 != before->HotKey2) {
+                isPressedHotKey1 = false;
+                isResetTasks = false;
+            }
+            if (desired.DiskCacheLimitMB != before->DiskCacheLimitMB)
+                NormalMapStore::GetSingleton().CheckDiskCacheCapacity();
+            auto status = "已应用 " + std::to_string(appliedCount) + " 项设置；此操作未写入 INI。";
+            if (restartCount) status += "另有 " + std::to_string(restartCount) + " 项需保存到 INI 后重启游戏。";
+            FinishMenuApply(true, status);
+        } catch (const std::exception& e) {
+            std::string ignored;
+            Config::GetSingleton().ApplyRuntimeTuning(*before, ignored);
+            spdlog::set_level(Config::GetSingleton().GetLogLevel());
+            spdlog::flush_on(Config::GetSingleton().GetFlushLevel());
+            weldDistance = std::max(floatPrecision, Config::GetSingleton().GetWeldDistance());
+            weldDistanceMult = 1.0f / weldDistance;
+            boundaryWeldDistance = std::max(floatPrecision, Config::GetSingleton().GetBoundaryWeldDistance());
+            boundaryWeldDistanceMult = 1.0f / boundaryWeldDistance;
+            try {
+                if (reconfigure) InitialSetting();
+                if (reconfigure || regenerate) {
+                    ConditionManager::GetSingleton().InitialConditionList();
+                    static_cast<MultipleConfig*>(&Config::GetSingleton())->LoadConditionFile();
+                    ConditionManager::GetSingleton().SortConditions();
+                }
+                if (regenerate) updater.Init();
+            } catch (...) { logger::error("Unable to restore all processing resources after failed settings apply"); }
+            FinishMenuApply(false, std::string("应用失败，已恢复原配置：") + e.what());
+        }
+    }
+
     TaskManager::~TaskManager() {
+        menuApplyAlive->store(false);
         WaitForComputations();
     }
 
@@ -24,6 +183,8 @@ namespace Mus {
     }
 
     void TaskManager::onEvent(const QuitGameEvent& e) {
+        menuApplyAlive->store(false);
+        if (pendingMenuApply) FinishMenuApply(false, "游戏正在退出，配置未应用。");
         WaitForComputations();
     }
 
@@ -48,6 +209,8 @@ namespace Mus {
         }
 
 		RunDelayTask();
+        ProcessMenuApply();
+		if (pendingMenuApply) return;
 		RunUpdateQueue();
 		RunManageResource(false);
 	}
@@ -215,6 +378,7 @@ namespace Mus {
                     geometryRetry.Forget(map.first);
                     continue;
                 }
+                if (!IsActorEnabled(actor)) continue;
                 if (GetIsActiveActor(actor->formID))
                 {
                     if (!GetIsUpdating(actor->formID))
@@ -378,6 +542,7 @@ namespace Mus {
             return false;
 		if (!a_actor || bipedSlot == 0)
 			return false;
+        if (!IsActorEnabled(a_actor)) return true;
 
         auto condition = ConditionManager::GetSingleton().GetCondition(a_actor);
         if (!condition.Enable)
@@ -913,10 +1078,13 @@ namespace Mus {
 		if (!IsExistLastNormalMap(a_actor->formID))
             return true;
 
-		auto geometries = GetAllGeometries(a_actor);
-        for (auto& pair : geometries)
+        std::vector<RE::BSGeometry*> restoreGeometries;
+        RE::BSVisit::TraverseScenegraphGeometries(a_actor->loadedData->data3D.get(), [&](RE::BSGeometry* geometry) {
+            if (geometry) restoreGeometries.push_back(geometry);
+            return RE::BSVisit::BSVisitControl::kContinue;
+        });
+        for (auto geo : restoreGeometries)
         {
-            auto geo = pair.second;
             using Feature = RE::BSShaderMaterial::Feature;
             if (!geo || geo->name.empty())
                 continue;
@@ -926,10 +1094,11 @@ namespace Mus {
             auto lightingShader = netimmerse_cast<RE::BSLightingShaderProperty*>(effect);
             if (!lightingShader || !lightingShader->flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kModelSpaceNormals))
                 continue;
-            if (auto alphaProperty = geo->GetGeometryRuntimeData().alphaProperty.get(); alphaProperty)
-                continue;
             RE::BSLightingShaderMaterialBase* material = skyrim_cast<RE::BSLightingShaderMaterialBase*>(lightingShader->material);
             if (!material || !material->normalTexture || !material->textureSet)
+                continue;
+            // Include generated overlays, but leave unrelated mods' replacements alone.
+            if (material->normalTexture->name.empty() || !IsCreatedByMDNM(material->normalTexture->name.c_str()))
                 continue;
             std::string texturePath = lowLetter(GetTexturePath(material->textureSet.get(), RE::BSTextureSet::Texture::kNormal));
             if (texturePath.empty())
@@ -1005,11 +1174,11 @@ namespace Mus {
 						continue;
 				}
 
-				if (keyCode == Config::GetSingleton().GetHotKey1())
+				if (Config::GetSingleton().GetHotKey1() != 0 && keyCode == Config::GetSingleton().GetHotKey1())
 				{
 					isPressedHotKey1 = button->IsPressed();
 				}
-				else if (keyCode == Config::GetSingleton().GetHotKey2())
+				else if (Config::GetSingleton().GetHotKey2() != 0 && keyCode == Config::GetSingleton().GetHotKey2())
 				{
                     if (button->IsUp())
                     {
@@ -1048,7 +1217,7 @@ namespace Mus {
                     {
                         if (isResetTasks)
                             return EventResult::kContinue;
-                        if (HasPendingUpdates() || ActorVertexHasher::GetSingleton().HasPendingDetection() ||
+                        if (pendingMenuApply || HasPendingUpdates() || ActorVertexHasher::GetSingleton().HasPendingDetection() ||
                             ObjectNormalMapUpdater::GetSingleton().GetCount() > 0 ||
                             NormalMapStore::GetSingleton().HasPendingDiskWrites())
                         {

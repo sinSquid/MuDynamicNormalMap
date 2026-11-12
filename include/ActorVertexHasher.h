@@ -19,6 +19,8 @@ namespace Mus {
 
 		void Init();
         bool HasPendingDetection() const { return detectionGate.Busy(); }
+        void PauseForMenuApply(bool paused) { tuningPaused.store(paused); }
+        void ResetRegistrations(); // Called on the frame thread after detection has drained.
 
 		class Hash {
 		private:
@@ -74,6 +76,7 @@ namespace Mus {
 		EventResult ProcessEvent(const SKSE::NiNodeUpdateEvent* evn, RE::BSTEventSource<SKSE::NiNodeUpdateEvent>*) override;
 
 	private:
+        std::atomic<bool> tuningPaused = false;
 		void CheckingActorHash();
         void WaitForPendingDetection();
 		bool GetHash(RE::Actor* a_actor, GeometryHash& hashMap);

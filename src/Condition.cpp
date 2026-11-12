@@ -39,7 +39,11 @@ namespace Mus {
 				return condition;
 			}
 		}
-		return Condition();
+        Condition fallback;
+        const auto tuning = Config::GetSingleton().GetRuntimeTuning();
+        fallback.HeadEnable = tuning->HeadEnable;
+        fallback.DetailStrength = tuning->DetailStrength;
+		return fallback;
 	}
 
 	bool ConditionManager::RegisterCondition(Condition condition)

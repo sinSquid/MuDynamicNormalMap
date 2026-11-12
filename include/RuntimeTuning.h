@@ -6,40 +6,86 @@
 #include <string>
 
 namespace Mus {
+    // Defaults match Config.h at the reviewed baseline; distances are unsquared game units.
     struct RuntimeTuning {
         int detectTickMS = 1000;
         float detectDistance = 512.0f;
         float updateDistance = 4096.0f;
         int updateDelayTick = 1;
+        int logLevel = 2;
+        int flushLevel = 0;
+        bool DebugTexture = false;
+        bool TickTimeToRealFPS = false;
+        bool QueueTime = false;
+        bool FullUpdateTime = false;
+        bool ActorVertexHasherTime1 = false;
+        bool ActorVertexHasherTime2 = false;
+        bool GeometryDataTime = false;
+        bool UpdateNormalMapTime1 = false;
+        bool UpdateNormalMapTime2 = false;
+        bool MergeTime = false;
+        bool GenerateMipsTime = false;
+        bool BleedTextureTime1 = false;
+        bool BleedTextureTime2 = false;
+        bool CompressTime = false;
+        bool TextureCopyTime = false;
+        bool PlayerEnable = true;
+        bool NPCEnable = true;
+        bool MaleEnable = true;
+        bool FemaleEnable = true;
+        bool HeadEnable = false;
+        int HotKey1 = 0;
+        int HotKey2 = 43;
+        bool UseConsoleRef = true;
+        bool RevertNormalMap = false;
+        bool ApplyOverlay = true;
+        bool RemoveSkinOverrides = true;
+        bool RemoveNodeOverrides = true;
+        float WeldDistance = 0.02f;
+        float BoundaryWeldDistance = 0.02f;
+        bool WeldAccuracy = true;
+        float NormalSmoothDegree = 60.0f;
+        bool AllowInvertNormalSmooth = false;
+        int Subdivision = 0;
+        int SubdivisionTriThreshold = 65535;
+        int SubdivisionVertexSmooth = 1;
+        float SubdivisionVertexSmoothStrength = 0.5f;
+        int VertexSmooth = 0;
+        float VertexSmoothStrength = 0.5f;
+        int VertexSmoothByAngle = 0;
+        float VertexSmoothByAngleThreshold1 = 45.0f;
+        float VertexSmoothByAngleThreshold2 = 60.0f;
+        int TextureWidth = 2048;
+        int TextureHeight = 2048;
+        bool TangentZCorrection = true;
+        float DetailStrength = 0.5f;
+        bool IgnoreMissingNormalMap = true;
+        bool GPUEnable = true;
+        int GPUDeviceIndex = -1;
+        bool GPUForceSync = false;
+        bool UpdateDistanceVramSave = false;
+        bool UseMipMap = true;
+        int AutoTaskQ = 3;
+        bool EcoreUse = false;
+        bool ProcessingInLoading = false;
+        bool ProcessingInLoadingWithMainGPU = true;
+        int TaskQTickMS = 100;
+        int TextureCompress = 1;
+        int TextureCompressQuality = 1;
+        int SIMDtype = 3;
+        bool DiskCache = true;
+        std::string DiskCacheFolder = "Data\\SKSE\\Plugins\\MuDynamicNormalMap\\DiskCache";
+        int DiskCacheLimitMB = 500;
+        bool ClearDiskCache = true;
+        int DiskCacheHashPrecision = 9;
+        bool RealtimeDetect = true;
+        int RealtimeDetectHead = 1;
+        bool RealtimeDetectOnBackGround = false;
+        bool DetectTextureChange = true;
         bool operator==(const RuntimeTuning&) const = default;
     };
 
-    inline bool NormalizeRuntimeTuning(const RuntimeTuning& input, RuntimeTuning& normalized, std::string& error) {
-        if (input.detectTickMS < 0 || input.detectTickMS > 60000) {
-            error = "Detection interval must be between 0 and 60000 ms.";
-            return false;
-        }
-        if (input.updateDelayTick < 0 || input.updateDelayTick > 255) {
-            error = "Mesh delay must be between 0 and 255 frames.";
-            return false;
-        }
-        if (!std::isfinite(input.detectDistance) || !std::isfinite(input.updateDistance) ||
-            input.detectDistance < 0 || input.updateDistance < 0 ||
-            input.detectDistance > 100000.0f || input.updateDistance > 100000.0f) {
-            error = "Distances must be finite values between 0 and 100000.";
-            return false;
-        }
-        normalized = input;
-        // The existing distance tests use squared game units and 1e-6 precision.
-        if (normalized.detectDistance <= 0.001f) normalized.detectDistance = 0;
-        if (normalized.updateDistance <= 0.001f) normalized.updateDistance = 0;
-        if (normalized.detectDistance == 0 || normalized.updateDistance == 0)
-            normalized.updateDistance = 0;
-        else
-            normalized.updateDistance = std::max(normalized.updateDistance, normalized.detectDistance);
-        error.clear();
-        return true;
-    }
+    inline bool NormalizeRuntimeTuning(const RuntimeTuning&, RuntimeTuning&, std::string&);
 
     class RuntimeTuningStore {
     public:
@@ -49,11 +95,13 @@ namespace Mus {
         bool Apply(const RuntimeTuning& input, std::string& error) {
             RuntimeTuning normalized;
             if (!NormalizeRuntimeTuning(input, normalized, error)) return false;
-            auto next = std::make_shared<const RuntimeTuning>(normalized);
-            current.store(std::move(next), std::memory_order_release);
+            current.store(std::make_shared<const RuntimeTuning>(std::move(normalized)), std::memory_order_release);
             return true;
         }
     private:
         std::atomic<std::shared_ptr<const RuntimeTuning>> current{std::make_shared<const RuntimeTuning>()};
     };
 }
+
+// The catalog defines validation using the same member bindings used by UI and INI persistence.
+#include "SettingsCatalog.h"

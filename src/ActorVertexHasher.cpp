@@ -21,9 +21,14 @@ namespace Mus {
 
 	}
 
+    void ActorVertexHasher::ResetRegistrations() {
+        { std::lock_guard lock(actorHashLock); actorHash.clear(); }
+        { std::lock_guard lock(blockActorsLock); blockActors.clear(); }
+    }
+
 	void ActorVertexHasher::onEvent(const FrameEvent& e)
 	{
-		if (detectionStopped.load())
+		if (detectionStopped.load() || tuningPaused.load() || !Config::GetSingleton().GetRealtimeDetect())
             return;
 		static std::clock_t lastTickTime = currentTime;
 

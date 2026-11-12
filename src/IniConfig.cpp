@@ -1,12 +1,13 @@
 #include "IniConfig.h"
+#include "SettingsCatalog.h"
 #include <Windows.h>
 #include <algorithm>
-#include <array>
 #include <atomic>
-#include <charconv>
-#include <limits>
+#include <cstdint>
 #include <mutex>
+#include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace Mus::IniConfig {
@@ -31,13 +32,6 @@ namespace Mus::IniConfig {
             const auto first = text.find_first_not_of(" \t\r");
             if (first == text.npos) return {};
             return text.substr(first, text.find_last_not_of(" \t\r") - first + 1);
-        }
-        std::string Number(float value) {
-            std::array<char, 64> buffer{};
-            const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value,
-                std::chars_format::general, std::numeric_limits<float>::max_digits10);
-            if (result.ec != std::errc{}) throw std::runtime_error("Cannot format INI number");
-            return {buffer.data(), result.ptr};
         }
         bool ReadBytes(HANDLE file, std::string& bytes) {
             LARGE_INTEGER size{};
@@ -64,19 +58,27 @@ namespace Mus::IniConfig {
                 lines.push_back({input.substr(pos, end - pos - (cr ? 1 : 0)), ending});
                 pos = end + 1;
             }
-            std::array<Setting, 4> settings{{
-                {"General", "UpdateDelayTick", std::to_string(tuning.updateDelayTick)},
-                {"Performance", "UpdateDistance", Number(tuning.updateDistance)},
-                {"RealtimeDetect", "DetectDistance", Number(tuning.detectDistance)},
-                {"RealtimeDetect", "DetectTickMS", std::to_string(tuning.detectTickMS)}
-            }};
+            std::vector<Setting> settings;
+            std::vector<std::string_view> sections;
+            for (const auto& descriptor : GetMenuSettingsCatalog()) {
+                auto value = SettingValueText(descriptor, tuning);
+                // The loader trims values and treats #/; as comments. Reject
+                // strings that could change meaning or inject INI content.
+                if (value.find_first_of("\r\n#;") != value.npos ||
+                    value.find('\0') != value.npos || Trim(value) != value)
+                    throw std::runtime_error("Cannot safely serialize INI setting " + std::string(descriptor.key));
+                settings.push_back({descriptor.section, descriptor.key, std::move(value)});
+                if (std::find(sections.begin(), sections.end(), descriptor.section) == sections.end())
+                    sections.push_back(descriptor.section);
+            }
             std::string section;
             for (auto& line : lines) {
                 const auto comment = line.text.find_first_of("#;");
                 const auto active = std::string_view(line.text).substr(0, comment);
                 const auto trimmed = Trim(active);
-                if (trimmed.size() >= 2 && trimmed.front() == '[' && trimmed.back() == ']') {
-                    section = std::string(trimmed.substr(1, trimmed.size() - 2));
+                if (!trimmed.empty() && trimmed.front() == '[') {
+                    section = trimmed.size() >= 2 && trimmed.back() == ']' ?
+                        std::string(Trim(trimmed.substr(1, trimmed.size() - 2))) : std::string{};
                     continue;
                 }
                 const auto equals = active.find('=');
@@ -94,7 +96,7 @@ namespace Mus::IniConfig {
                 }
             }
             // Insert missing keys at the end of the last matching section.
-            for (const auto sectionName : {"General", "Performance", "RealtimeDetect"}) {
+            for (const auto sectionName : sections) {
                 std::vector<Line> additions;
                 for (const auto& setting : settings)
                     if (!setting.found && setting.section == sectionName)
@@ -105,9 +107,10 @@ namespace Mus::IniConfig {
                 for (std::size_t i = 0; i < lines.size(); ++i) {
                     const auto active = std::string_view(lines[i].text).substr(0, lines[i].text.find_first_of("#;"));
                     const auto trimmed = Trim(active);
-                    if (trimmed.size() >= 2 && trimmed.front() == '[' && trimmed.back() == ']') {
+                    if (!trimmed.empty() && trimmed.front() == '[') {
                         if (inSection) insertAt = i;
-                        inSection = trimmed.substr(1, trimmed.size() - 2) == sectionName;
+                        inSection = trimmed.size() >= 2 && trimmed.back() == ']' &&
+                            Trim(trimmed.substr(1, trimmed.size() - 2)) == sectionName;
                         if (inSection) { foundSection = true; insertAt = lines.size(); }
                     }
                 }

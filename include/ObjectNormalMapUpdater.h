@@ -49,6 +49,12 @@ namespace Mus {
 		}
 
 		bool Init();
+        bool HasPendingCleanup() const {
+            const auto busy = [](const std::future<void>& job) {
+                return job.valid() && job.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+            };
+            return busy(resourceCleanup) || busy(geometryCleanup);
+        }
 		bool CreateGeometryResourceData(RE::FormID a_actorID, GeometryDataPtr a_data);
 
 		void ClearGeometryResourceData();

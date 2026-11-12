@@ -2,6 +2,8 @@
 #include "AsyncWork.h"
 #include "GeometryRetry.h"
 #include <future>
+#include <optional>
+#include "RuntimeTuning.h"
 
 namespace Mus {
 	class TaskManager :
@@ -23,6 +25,9 @@ namespace Mus {
 		}
 
 		void Init();
+        using MenuApplyCompletion = std::function<void(bool, const std::string&)>;
+        // Called on the SKSE main thread; frame processing waits for a safe apply boundary.
+        void QueueMenuApply(const RuntimeTuning& tuning, MenuApplyCompletion completion);
 
 		enum BipedObjectSlot : std::uint32_t
 		{
@@ -93,6 +98,19 @@ namespace Mus {
 		EventResult ProcessEvent(const RE::MenuOpenCloseEvent* evn, RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override;
 
 	private:
+        struct MenuApplyRequest {
+            RuntimeTuning tuning;
+            MenuApplyCompletion completion;
+            std::chrono::steady_clock::time_point queuedAt;
+        };
+        std::optional<MenuApplyRequest> pendingMenuApply;
+        std::shared_ptr<std::atomic<bool>> menuApplyAlive = std::make_shared<std::atomic<bool>>(true);
+        bool menuApplyScheduled = false;
+        void ProcessMenuApply();
+        void ExecuteMenuApply();
+        void RefreshRegisteredActors();
+        bool IsActorEnabled(RE::Actor* actor) const;
+        void FinishMenuApply(bool success, const std::string& status);
         void WaitForComputations();
         void PruneCompletedComputations();
         std::atomic<bool> stoppingComputations = false;

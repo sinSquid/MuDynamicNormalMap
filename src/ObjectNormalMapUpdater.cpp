@@ -1,4 +1,5 @@
 #include "ObjectNormalMapUpdater.h"
+#include "SettingsCatalog.h"
 
 namespace Mus {
     ObjectNormalMapUpdater::~ObjectNormalMapUpdater() { WaitForCleanup(); }
@@ -418,7 +419,7 @@ namespace Mus {
 
 	std::uint64_t ObjectNormalMapUpdater::GetHash(UpdateTextureSet updateSet, std::uint64_t geoHash)
 	{
-		return std::hash<std::string>()(std::to_string(updateSet.slot) + "|"
+		return std::hash<std::string>()(RuntimeGenerationSignature(*Config::GetSingleton().GetRuntimeTuning()) + "|" + std::to_string(updateSet.slot) + "|"
 										+ updateSet.srcTexturePath + "|"
 										+ updateSet.detailTexturePath + "|"
 										+ updateSet.overlayTexturePath + "|"
