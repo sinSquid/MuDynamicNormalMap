@@ -728,7 +728,7 @@ namespace Mus {
 			auto found = niTextures.find(name);
 			if (found != niTextures.end())
 			{
-				if (found->second)
+				if (found->second && found->second->rendererTexture)
 				{
 					auto oldTexture = found->second->rendererTexture->texture;
 					auto oldResource = found->second->rendererTexture->resourceView;

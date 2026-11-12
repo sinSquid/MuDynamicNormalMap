@@ -16,7 +16,7 @@ namespace Mus {
 		}
 
 		void InitialConditionMap();
-		void InitialConditionList() { ConditionList.clear(); };
+		void InitialConditionList() { std::lock_guard lg(ConditionListLock); ConditionList.clear(); };
 
 		enum ConditionType : std::uint32_t {
 			HasKeyword,
@@ -71,9 +71,9 @@ namespace Mus {
 
 		const Condition GetCondition(RE::Actor* a_actor);
 
-		std::size_t ConditionCount() const { return ConditionList.size(); }
+		std::size_t ConditionCount() const { std::shared_lock sl(ConditionListLock); return ConditionList.size(); }
 	private:
-        std::mutex ConditionListLock; // lock write only
+        mutable std::shared_mutex ConditionListLock;
 		std::vector<Condition> ConditionList;
 		std::unordered_map<std::string, ConditionType> ConditionMap;
 
@@ -81,7 +81,7 @@ namespace Mus {
 		const ConditionType GetConditionType(std::string line, ConditionItem& item);
 
 		bool GetConditionFunction(ConditionItem& item);
-		bool ConditionCheck(RE::Actor* a_actor, Condition condition);
+		bool ConditionCheck(RE::Actor* a_actor, const Condition& condition);
 
 		inline void Logging(RE::Actor* a_actor, const ConditionItem& OR, bool isTrue) {
 			std::string typestr = magic_enum::enum_name(ConditionType(OR.type)).data();

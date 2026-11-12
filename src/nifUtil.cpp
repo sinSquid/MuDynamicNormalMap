@@ -138,18 +138,18 @@ namespace Mus::nif {
     bool IsSkinned(RE::BSGeometry* a_geometry)
     {
         if (!a_geometry)
-            return true;
+            return false;
         RE::NiProperty* effect = a_geometry->GetGeometryRuntimeData().shaderProperty.get();
         if (!effect)
             return false;
         RE::BSLightingShaderProperty* lightingShader = netimmerse_cast<RE::BSLightingShaderProperty*>(effect);
         if (!lightingShader)
             return false;
-        IsSkinned(lightingShader);
+        return IsSkinned(lightingShader);
     }
     bool IsSkinned(RE::BSLightingShaderProperty* property)
     {
-        return property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kSkinned);
+        return property && property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kSkinned);
     }
 
     const std::string NodePrefix = "MDTT";

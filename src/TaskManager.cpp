@@ -1,6 +1,32 @@
 #include "TaskManager.h"
 
 namespace Mus {
+    TaskManager::~TaskManager() {
+        WaitForComputations();
+    }
+
+    void TaskManager::PruneCompletedComputations() {
+        std::erase_if(pendingComputations, [](auto& computation) {
+            return !computation.valid() || computation.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+        });
+    }
+
+    void TaskManager::WaitForComputations() {
+        stoppingComputations.store(true);
+        // Computations can wait for more GPU tasks after frame pumping has ended.
+        if (gpuTask)
+            gpuTask->BeginDrain();
+        // Completion callbacks may retain busy tickets until a frame runs. Wait
+        // only for computation futures, with all TaskManager members still alive.
+        for (auto& computation : pendingComputations)
+            if (computation.valid()) computation.wait();
+        pendingComputations.clear();
+    }
+
+    void TaskManager::onEvent(const QuitGameEvent& e) {
+        WaitForComputations();
+    }
+
 	void TaskManager::Init()
 	{
 		if (const auto Menu = RE::UI::GetSingleton(); Menu)
@@ -13,8 +39,13 @@ namespace Mus {
 
 	void TaskManager::onEvent(const FrameEvent& e)
 	{
-        if (IsSaveLoading.load() || IsInLoading.load())
-			return;
+        if (stoppingComputations.load())
+            return;
+        PruneCompletedComputations();
+        if (IsSaveLoading.load() || IsInLoading.load()) {
+            geometryRetry.Clear();
+            return;
+        }
 
 		RunDelayTask();
 		RunUpdateQueue();
@@ -29,6 +60,7 @@ namespace Mus {
 			return;
 
 		RE::FormID id = actor->formID;
+        geometryRetry.Forget(id);
 		std::string name = actor->GetName();
 		RegisterDelayTask(Config::GetSingleton().GetUpdateDelayTick(), [this, id, name]() {
 			RE::Actor* actor = GetFormByID<RE::Actor*>(id);
@@ -46,6 +78,7 @@ namespace Mus {
 			return;
 
 		RE::FormID id = e.actor->formID;
+        geometryRetry.Forget(id);
 		std::string name = e.actor->GetName();
 		RegisterDelayTask(Config::GetSingleton().GetUpdateDelayTick(), [this, id, name]() {
 			RE::Actor* actor = GetFormByID<RE::Actor*>(id);
@@ -65,6 +98,7 @@ namespace Mus {
 			return;
 
 		RE::FormID id = e.actor->formID;
+        geometryRetry.Forget(id);
 		std::string name = e.actor->GetName();
 		RegisterDelayTask(Config::GetSingleton().GetUpdateDelayTick(), [this, id, name, e]() {
 			RE::Actor* actor = GetFormByID<RE::Actor*>(id);
@@ -95,8 +129,9 @@ namespace Mus {
 			return;
 		auto cameraPosition = camera->GetRuntimeData2().pos;
 
-        const float updateDistance = Config::GetSingleton().GetUpdateDistance();
-        if (updateDistance > 0)
+        const auto tuning = Config::GetSingleton().GetRuntimeTuning();
+        const float updateDistance = tuning->updateDistance * tuning->updateDistance;
+        // Re-evaluate actors when switching from a finite range to unlimited as well.
         {
             const bool vramSave = Config::GetSingleton().GetUpdateDistanceVramSave();
             std::vector<std::function<void()>> queues;
@@ -110,6 +145,7 @@ namespace Mus {
                         const auto actorID = it->first;
                         it = isActiveActors.erase(it);
                         RemoveLastNormalMap(actorID);
+                        geometryRetry.Forget(actorID);
                         continue;
                     }
 					if (IsPlayer(actor->formID))
@@ -165,18 +201,53 @@ namespace Mus {
             updateSlotQueue_ = std::move(updateSlotQueue);
         }
 
-        // Scene graph reads, material updates and NiTexture cache access must
-        // stay on the engine frame thread. Only copied geometry processing is async.
-        for (auto& map : updateSlotQueue_)
-        {
+        // Live scene graphs and NiTexture writes stay on the frame thread.
+        // Round-robin bounds per-frame scans without starving deferred actors.
+        const auto scanStart = GeometryRetry::Clock::now();
+        unsigned scans = 0;
+        std::vector<std::pair<RE::FormID, bSlotbit>> ordered;
+        auto split = updateSlotQueue_.upper_bound(lastScanActor);
+        ordered.insert(ordered.end(), split, updateSlotQueue_.end());
+        ordered.insert(ordered.end(), updateSlotQueue_.begin(), split);
+        for (auto& map : ordered) {
                 RE::Actor* actor = GetFormByID<RE::Actor*>(map.first);
-                if (IsInvalidActor(actor))
+                if (IsInvalidActor(actor)) {
+                    geometryRetry.Forget(map.first);
                     continue;
+                }
                 if (GetIsActiveActor(actor->formID))
                 {
                     if (!GetIsUpdating(actor->formID))
                     {
-                        QUpdateNormalMapImpl(actor, map.second);
+                        if (!ConditionManager::GetSingleton().GetCondition(actor).Enable)
+                            continue;
+                        auto root = actor->loadedData->data3D.get();
+                        auto race = actor->GetRace();
+                        const auto retryState = geometryRetry.Check(actor->formID, reinterpret_cast<std::uintptr_t>(root), race ? race->formID : 0);
+                        // Drop the request entirely after three spaced empty scans.
+                        // Model events or explicit refresh enqueue it again and clear the mark.
+                        if (retryState == GeometryRetry::State::Blacklisted)
+                            continue;
+                        if (retryState == GeometryRetry::State::CoolingDown ||
+                            scans >= 2 || (scans && GeometryRetry::Clock::now() - scanStart >= std::chrono::milliseconds(2))) {
+                            std::lock_guard lg(updateSlotQueueLock);
+                            updateSlotQueue[actor->formID] |= map.second;
+                            continue;
+                        }
+                        ++scans;
+                        lastScanActor = actor->formID;
+                        auto geometries = GetAllGeometries(actor);
+                        if (geometries.empty()) {
+                            const bool blacklisted = geometryRetry.Failed(actor->formID, reinterpret_cast<std::uintptr_t>(root), race ? race->formID : 0);
+                            logger::debug("{:x} : no supported geometry; {}", actor->formID, blacklisted ? "session model blacklist" : "retry after cooldown");
+                            if (!blacklisted) {
+                                std::lock_guard lg(updateSlotQueueLock);
+                                updateSlotQueue[actor->formID] |= map.second;
+                            }
+                        } else {
+                            geometryRetry.Forget(actor->formID);
+                            QUpdateNormalMapImpl(actor, std::move(geometries), map.second);
+                        }
                     }
                     else
                     {
@@ -202,17 +273,26 @@ namespace Mus {
 
 	void TaskManager::RunDelayTask()
 	{
-		auto delayTask_ = delayTasks.TakeReady();
-		if (delayTask_.empty())
-			return;
-
+		auto delayTask_ = std::move(deferredCallbacks);
+		deferredCallbacks.clear();
+		auto ready = delayTasks.TakeReady();
+		delayTask_.insert(delayTask_.end(), std::make_move_iterator(ready.begin()), std::make_move_iterator(ready.end()));
+		if (delayTask_.empty()) return;
 		if (Config::GetSingleton().GetQueueTime())
 			PerformanceLog(std::string(__func__), false, false);
-
-        // These callbacks include live material writes. Parallel execution here
-        // raced the renderer and the shared NiSourceTexture cache.
-        for (auto& task : delayTask_)
-            task();
+        // Completion callbacks can write live materials; never dispatch them via TBB.
+        const auto callbackStart = GeometryRetry::Clock::now();
+        std::size_t completed = 0;
+        for (; completed < delayTask_.size(); ++completed) {
+            if (completed >= 4 || (completed && GeometryRetry::Clock::now() - callbackStart >= std::chrono::milliseconds(2)))
+                break;
+            try { delayTask_[completed](); }
+            catch (const std::exception& e) { logger::error("Delayed task failed: {}", e.what()); }
+            catch (...) { logger::error("Delayed task failed with unknown exception"); }
+        }
+        if (completed < delayTask_.size()) {
+            deferredCallbacks.insert(deferredCallbacks.end(), std::make_move_iterator(delayTask_.begin() + completed), std::make_move_iterator(delayTask_.end()));
+        }
 
 		if (Config::GetSingleton().GetQueueTime())
 			PerformanceLog(std::string(__func__), true, false, delayTask_.size());
@@ -267,6 +347,8 @@ namespace Mus {
 	}
     bool TaskManager::QUpdateNormalMap(RE::Actor* a_actor, bSlotbit bipedSlot)
     {
+		if (stoppingComputations.load())
+            return false;
         if (!a_actor || bipedSlot == 0)
             return false;
         RE::FormID id = a_actor->formID;
@@ -290,8 +372,10 @@ namespace Mus {
         return true;
     }
 
-	bool TaskManager::QUpdateNormalMapImpl(RE::Actor* a_actor, bSlotbit bipedSlot)
+	bool TaskManager::QUpdateNormalMapImpl(RE::Actor* a_actor, GeometryList a_srcGeometies, bSlotbit bipedSlot)
 	{
+		if (stoppingComputations.load())
+            return false;
 		if (!a_actor || bipedSlot == 0)
 			return false;
 
@@ -299,7 +383,6 @@ namespace Mus {
         if (!condition.Enable)
             return true;
 
-        auto a_srcGeometies = GetAllGeometries(a_actor);
 		if (a_srcGeometies.empty())
 		{
 			logger::error("{}::{:x}::{} : no valid geometry found", __func__, a_actor->formID, a_actor->GetName());
@@ -404,18 +487,21 @@ namespace Mus {
 	}
 	void TaskManager::QUpdateNormalMapImpl(RE::FormID a_actorID, std::string a_actorName, GeometryDataPtr a_geoData, UpdateSet& a_updateSet, RE::NiPointer<RE::NiAVObject> sourceRoot)
 	{
-        if (!a_geoData || a_updateSet.empty() || GetIsUpdating(a_actorID))
+        if (stoppingComputations.load() || !a_geoData || a_updateSet.empty() || GetIsUpdating(a_actorID))
 			return;
 
-		SetIsUpdating(a_actorID, true);
-        auto func = [this, a_actorID, a_actorName, a_geoData, sourceRoot, a_updateSet = std::move(a_updateSet)]() mutable {
+        // Keep the busy state until the frame-thread completion is consumed.
+        auto busyTicket = ActorWorkState::Claim(actorWorkState, a_actorID);
+        auto func = [this, a_actorID, a_actorName, a_geoData, sourceRoot, busyTicket = std::move(busyTicket), a_updateSet = std::move(a_updateSet)]() mutable {
+          // A stored future retains its callable; the frame completion owns busy.
+          auto activeTicket = std::move(busyTicket);
+          try {
             if (Config::GetSingleton().GetFullUpdateTime())
                 PerformanceLog(std::string("QUpdateNormalMapImpl") + "::" + SetHex(a_actorID, false), false, false);
 
             if (!ObjectNormalMapUpdater::GetSingleton().CreateGeometryResourceData(a_actorID, a_geoData))
             {
                 logger::error("{:x}::{} : Failed to get geometry data", a_actorID, a_actorName);
-                SetIsUpdating(a_actorID, false);
                 return;
             }
 
@@ -427,16 +513,14 @@ namespace Mus {
             if (textures.empty())
             {
                 logger::error("{:x}::{} : Failed to update object normalmap", a_actorID, a_actorName);
-                SetIsUpdating(a_actorID, false);
                 return;
             }
 
-            RegisterDelayTask([this, a_actorID, a_actorName, sourceRoot, textures = std::move(textures)]() {
+            RegisterDelayTask([this, a_actorID, a_actorName, sourceRoot, busyTicket = activeTicket, textures = std::move(textures)]() {
                 auto actor = GetFormByID<RE::Actor*>(a_actorID);
                 if (IsInvalidActor(actor))
                 {
                     logger::error("{:x}::{} : invalid reference", a_actorID, a_actorName);
-                    SetIsUpdating(a_actorID, false);
                     return;
                 }
 
@@ -445,7 +529,7 @@ namespace Mus {
                 {
                     // A load or 3D rebuild replaced the graph while work was in flight.
                     // Retain the current materials and request fresh data next frame.
-                    SetIsUpdating(a_actorID, false);
+                    geometryRetry.Forget(a_actorID);
                     QUpdateNormalMap(actor, BipedObjectSlot::kAll);
                     return;
                 }
@@ -475,14 +559,14 @@ namespace Mus {
                         else
                             return RE::BSVisit::BSVisitControl::kContinue;
 
-                        found = std::find_if(textures.begin(), textures.end(), [&](ObjectNormalMapUpdater::NormalMapResult normalmap) {
+                        found = std::find_if(textures.begin(), textures.end(), [&](const ObjectNormalMapUpdater::NormalMapResult& normalmap) {
                             return normalmap.slot == slot &&
                                    !IsContainString(normalmap.geoName, "Vagina") && !IsContainString(normalmap.geoName, "Anus") && !IsContainString(normalmap.geoName, "Canal");
                         });
                     }
                     else
                     {
-                        found = std::find_if(textures.begin(), textures.end(), [&](ObjectNormalMapUpdater::NormalMapResult normalmap) {
+                        found = std::find_if(textures.begin(), textures.end(), [&](const ObjectNormalMapUpdater::NormalMapResult& normalmap) {
                             return normalmap.geometry == geo;
                         });
                     }
@@ -507,7 +591,7 @@ namespace Mus {
                         if (dismember)
                         {
                             std::string texturePath = GetOriginalTexturePath(lowLetter(material->normalTexture->name.c_str()));
-                            found = std::find_if(textures.begin(), textures.end(), [&](ObjectNormalMapUpdater::NormalMapResult normalmap) {
+                            found = std::find_if(textures.begin(), textures.end(), [&](const ObjectNormalMapUpdater::NormalMapResult& normalmap) {
                                 for (std::int32_t p = 0; p < dismember->GetRuntimeData().numPartitions; p++)
                                 {
                                     bSlot slot;
@@ -567,18 +651,26 @@ namespace Mus {
                     logger::info("{:x}::{}::{} : update object normalmap done", a_actorID, a_actorName, geo->name.c_str());
                     return RE::BSVisit::BSVisitControl::kContinue;
                 });
-                SetIsUpdating(a_actorID, false);
             });
 
             if (Config::GetSingleton().GetFullUpdateTime())
                 PerformanceLog(std::string("QUpdateNormalMapImpl") + "::" + SetHex(a_actorID, false), true, false);
+          } catch (const std::exception& e) {
+            logger::error("{:x} : normal-map task failed: {}", a_actorID, e.what());
+          } catch (...) {
+            logger::error("{:x} : normal-map task failed with unknown exception", a_actorID);
+          }
         };
         if (isImmediately)
         {
-            currentActorThreads.load()->submitAsync(func).get();
+            currentActorThreads.load()->submitAsync(std::move(func)).get();
         }
-        else
-            currentActorThreads.load()->submitAsync(func);
+        else {
+            // Allocate ownership before dispatch so an allocation failure cannot
+            // leave an untracked computation referring to this TaskManager.
+            pendingComputations.emplace_back();
+            pendingComputations.back() = currentActorThreads.load()->submitAsync(std::move(func));
+        }
 	}
 
 	std::string TaskManager::GetDetailNormalMapPath(std::string a_normalMapPath)
@@ -686,8 +778,7 @@ namespace Mus {
 		std::string filename = file.stem().string();
 		for (auto& folder : a_proxyFolder)
 		{
-			a_normalMapPath = folder + "\\" + filename + ".dds";
-			result = GetOverlayNormalMapPath(a_normalMapPath);
+			result = GetOverlayNormalMapPath(folder + "\\" + filename + ".dds");
 			if (!result.empty())
 				return result;
 		}
@@ -753,8 +844,7 @@ namespace Mus {
 		std::string filename = file.stem().string();
 		for (auto& folder : a_proxyFolder)
 		{
-			a_normalMapPath = folder + "\\" + filename + ".dds";
-			result = GetMaskNormalMapPath(a_normalMapPath);
+			result = GetMaskNormalMapPath(folder + "\\" + filename + ".dds");
 			if (!result.empty())
 				return result;
 		}
@@ -862,6 +952,7 @@ namespace Mus {
 		if (!actor)
 			return EventResult::kContinue; 
 		RE::FormID id = actor->formID;
+        geometryRetry.Forget(id);
 		std::string name = actor->GetName();
 		RegisterDelayTask(Config::GetSingleton().GetUpdateDelayTick(), [this, id, name]() {
 			RE::Actor* actor = GetFormByID<RE::Actor*>(id);
@@ -945,7 +1036,8 @@ namespace Mus {
 							}
 							if (!target)
 								target = RE::PlayerCharacter::GetSingleton();
-							QUpdateNormalMap(target, BipedObjectSlot::kAll);
+							if (target) geometryRetry.Forget(target->formID);
+                            QUpdateNormalMap(target, BipedObjectSlot::kAll);
 							std::string notification = "MDNM : Re-update ";
 							notification += target->GetName();
 							notification += " " + GetHexStr(target->formID);
@@ -956,15 +1048,23 @@ namespace Mus {
                     {
                         if (isResetTasks)
                             return EventResult::kContinue;
-                        if (ObjectNormalMapUpdater::GetSingleton().GetCount() > 0)
+                        if (HasPendingUpdates() || ActorVertexHasher::GetSingleton().HasPendingDetection() ||
+                            ObjectNormalMapUpdater::GetSingleton().GetCount() > 0 ||
+                            NormalMapStore::GetSingleton().HasPendingDiskWrites())
                         {
                             RE::SendHUDMessage::ShowHUDMessage("MDNM : Some normalmaps are still being updated");
                             logger::warn("Some normalmaps are still being updated...");
                             return EventResult::kContinue;
                         }
-                        Mus::Config::GetSingleton().LoadConfig();
+                        if (!Mus::Config::GetSingleton().LoadConfig()) {
+                            RE::SendHUDMessage::ShowHUDMessage("MDNM : Reload failed; check configuration");
+                            logger::error("Reload failed: invalid or unreadable configuration");
+                            return EventResult::kContinue;
+                        }
+                        NormalMapStore::GetSingleton().Init();
                         InitialSetting();
-                        isUpdating.clear();
+                        actorWorkState->Clear();
+                        geometryRetry.Clear();
                         ConditionManager::GetSingleton().InitialConditionList();
                         static_cast<MultipleConfig*>(&Config::GetSingleton())->LoadConditionFile();
                         ConditionManager::GetSingleton().SortConditions();
@@ -1190,7 +1290,7 @@ namespace Mus {
 
 	void TaskManager::ReleaseResourceOnUnloadActors()
 	{
-        backGroundWorkerThreads->submitAsync([&]() {
+        {
             std::lock_guard lg(lastNormalMapLock);
             auto count = lastNormalMap.size();
             for (auto it = lastNormalMap.begin(); it != lastNormalMap.end();)
@@ -1210,6 +1310,6 @@ namespace Mus {
             }
             if (count != lastNormalMap.size())
                 logger::debug("Current remain NiTexture {}", lastNormalMap.size());
-        });
+        }
 	}
 }

@@ -1,22 +1,21 @@
 #pragma once
+#include <future>
 
 namespace Mus {
     class Ref {
     public:
         std::uint32_t DecRef() {
-            std::atomic_ref rc(refCount);
-            return --rc;
+            return --refCount;
         }
         std::uint32_t IncRef() {
-            std::atomic_ref rc(refCount);
-            return ++rc;
+            return ++refCount;
         }
-        constexpr std::uint32_t GetCount() const noexcept {
-            return refCount;
+        std::uint32_t GetCount() const noexcept {
+            return refCount.load();
         }
 
     private:
-        volatile std::uint32_t refCount = 0;
+        std::atomic<std::uint32_t> refCount = 0;
     };
 
 	class RefGuard {
@@ -38,10 +37,11 @@ namespace Mus {
 	class ObjectNormalMapUpdater : 
 		public Ref,
 		public IEventListener<FrameEvent>,
+		public IEventListener<QuitGameEvent>,
 		public IEventListener<PlayerCellChangeEvent> {
 	public:
 		ObjectNormalMapUpdater() {};
-		~ObjectNormalMapUpdater() {};
+		~ObjectNormalMapUpdater();
 
 		[[nodiscard]] static ObjectNormalMapUpdater& GetSingleton() {
 			static ObjectNormalMapUpdater instance;
@@ -71,9 +71,15 @@ namespace Mus {
 
 	protected:
 		void onEvent(const FrameEvent& e) override;
+		void onEvent(const QuitGameEvent& e) override;
 		void onEvent(const PlayerCellChangeEvent& e) override;
 
 	private:
+        void WaitForCleanup() noexcept;
+        static void FinishCleanup(std::future<void>& future) noexcept;
+        std::future<void> resourceCleanup;
+        std::future<void> geometryCleanup;
+        bool cleanupStopped = false; // Frame/cell/quit thread only.
 		inline ID3D11Device* GetDevice(std::int8_t i = -1) const { 
 			switch (i) {
             case 0:
@@ -437,7 +443,7 @@ namespace Mus {
         typedef std::unordered_map<RE::FormID, GeometryResourceDataPtr> GeometryResourceDataMap;
         std::shared_mutex geometryResourceDataMapLock;
         GeometryResourceDataMap geometryResourceDataMap;
-		GeometryResourceDataPtr GetGeometryResourceData(RE::FormID a_actorID);
+		GeometryResourceDataPtr CreateGeometryBuffers(RE::FormID a_actorID, GeometryDataPtr a_data);
 
 		std::shared_mutex resourceDataMapLock;
         typedef std::vector<TextureResourceDataPtr> ResourceDataMap;

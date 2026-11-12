@@ -12,7 +12,7 @@ namespace Mus {
 	bool PerformanceCheckConsolePrint = false;
 	bool PerformanceCheckTick = false;
 
-	std::clock_t currentTime = 0;
+	std::atomic<std::clock_t> currentTime = 0;
 
 	std::uint8_t divideTaskQ = 0;
     std::atomic<bool> isNoSplitGPU = false;

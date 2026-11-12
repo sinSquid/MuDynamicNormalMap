@@ -156,7 +156,8 @@ namespace Mus {
 				}
 				if (geo.objInfo.info.hasVertices)
 				{
-					vertices[vi] = *reinterpret_cast<DirectX::XMFLOAT3*>(block);
+					if (geo.objInfo.dynamicBlockData1.empty() && geo.objInfo.dynamicBlockData2.empty())
+                        vertices[vi] = *reinterpret_cast<DirectX::XMFLOAT3*>(block);
 					block += 12;
 					block += 4;
 				}
@@ -630,7 +631,7 @@ namespace Mus {
                         [&](const tbb::blocked_range<std::size_t>& r) {
                             for (std::size_t gi = r.begin(); gi != r.end(); ++gi)
                             {
-                                if (orgTriCount[gi] / 3 > a_triThreshold)
+                                if (orgTriCount[gi] > a_triThreshold)
                                     continue;
 
                                 auto& data = subdividedDatas[gi];
@@ -828,8 +829,7 @@ namespace Mus {
                                 for (std::size_t i = r.begin(); i != r.end(); ++i)
                                 {
                                     const auto vi = newEdges[i].mv;
-                                    pMap[i * 2 + 0] = PosEntry(MakeLowPositionKey(vertices[vi]), vi);
-                                    pMap[i * 2 + 1] = PosEntry(MakeHighPositionKey(vertices[vi]), vi);
+                                    pMap[i] = PosEntry(MakePositionKey(vertices[vi]), vi);
                                 }
                             },
                             tbb::auto_partitioner()

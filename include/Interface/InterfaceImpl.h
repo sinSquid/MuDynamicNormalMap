@@ -16,6 +16,8 @@ namespace MDNM {
 			Mus::Papyrus::detailStrengthMap[a_actor->formID] = std::clamp(a_strength, 0.0f, 1.0f);
 		}
 		virtual int SetNormalMap(RE::Actor* a_actor, const char* a_filePath, int type) {
+			if (!a_filePath)
+				return 0;
 			std::string filePath = a_filePath;
 			if (!a_actor || filePath.empty() || type < 0 || type >= normalmapTypes::max)
 				return 0;

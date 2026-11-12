@@ -1,20 +1,24 @@
 #pragma once
 #include "AsyncWork.h"
+#include <future>
 
 namespace Mus {
 	class ActorVertexHasher :
 		public IEventListener<FrameEvent>,
+		public IEventListener<QuitGameEvent>,
 		public IEventListener<FacegenNiNodeEvent>,
 		public IEventListener<ActorChangeHeadPartEvent>,
 		public IEventListener<ArmorAttachEvent>,
 		public RE::BSTEventSink<SKSE::NiNodeUpdateEvent> {
 	public:
+        ~ActorVertexHasher();
 		[[nodiscard]] static ActorVertexHasher& GetSingleton() {
 			static ActorVertexHasher instance;
 			return instance;
 		}
 
 		void Init();
+        bool HasPendingDetection() const { return detectionGate.Busy(); }
 
 		class Hash {
 		private:
@@ -63,6 +67,7 @@ namespace Mus {
 		bool RegisterCheckTexture(RE::Actor* a_actor, RE::BSGeometry* a_geo);
 	protected:
 		void onEvent(const FrameEvent& e) override; 
+        void onEvent(const QuitGameEvent& e) override;
 		void onEvent(const FacegenNiNodeEvent& e) override;
 		void onEvent(const ActorChangeHeadPartEvent& e) override;
 		void onEvent(const ArmorAttachEvent& e) override;
@@ -70,9 +75,12 @@ namespace Mus {
 
 	private:
 		void CheckingActorHash();
+        void WaitForPendingDetection();
 		bool GetHash(RE::Actor* a_actor, GeometryHash& hashMap);
 
 		SingleFlightGate detectionGate;
+        std::atomic<bool> detectionStopped = false;
+        std::future<void> pendingDetection;
 
 		mutable std::shared_mutex blockActorsLock;
 		std::unordered_map<RE::FormID, bool> blockActors;

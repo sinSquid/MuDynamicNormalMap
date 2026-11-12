@@ -23,7 +23,7 @@ namespace Mus {
 		{
 			if (slot >= 30)
 				slot -= 30;
-			return 1 << slot;
+			return slot < 32 ? (1u << slot) : 0u;
 		}
 
 		void QUpdateNormalmap(RE::StaticFunctionTag*, RE::Actor* a_actor, std::uint32_t bipedSlot)

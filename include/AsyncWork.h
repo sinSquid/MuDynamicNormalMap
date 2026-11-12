@@ -8,9 +8,41 @@
 #include <memory>
 #include <mutex>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 namespace Mus {
+    // Tickets may outlive the owning TaskManager during static destruction.
+    // Keep their synchronization and actor state independently owned.
+    class ActorWorkState {
+    public:
+        bool Any() const {
+            std::lock_guard lock(mutex);
+            return !actors.empty();
+        }
+        bool Contains(std::uint32_t id) const {
+            std::lock_guard lock(mutex);
+            return actors.find(id) != actors.end();
+        }
+        void Set(std::uint32_t id, bool busy) {
+            std::lock_guard lock(mutex);
+            if (busy) actors.insert(id);
+            else actors.erase(id);
+        }
+        void Clear() {
+            std::lock_guard lock(mutex);
+            actors.clear();
+        }
+        static std::shared_ptr<void> Claim(const std::shared_ptr<ActorWorkState>& state, std::uint32_t id) {
+            auto ticket = std::shared_ptr<void>(nullptr, [state, id](void*) { state->Set(id, false); });
+            state->Set(id, true);
+            return ticket;
+        }
+    private:
+        mutable std::mutex mutex;
+        std::unordered_set<std::uint32_t> actors;
+    };
+
     // A delay of N preserves the old N wrappers + one execution-pump semantics.
     // Callbacks are detached under the lock and invoked by the caller without it.
     class FrameTaskQueue {

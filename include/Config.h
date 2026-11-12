@@ -1,4 +1,5 @@
 #pragma once
+#include "RuntimeTuning.h"
 
 namespace Mus {
     enum SIMDType {
@@ -21,6 +22,8 @@ namespace Mus {
         bool LoadLogging();
         bool LoadConfig();
         bool LoadConfig(std::ifstream& configfile);
+        [[nodiscard]] std::shared_ptr<const RuntimeTuning> GetRuntimeTuning() const noexcept { return runtimeTuning.Get(); }
+        bool ApplyRuntimeTuning(const RuntimeTuning& values, std::string& error) { return runtimeTuning.Apply(values, error); }
 
         enum AutoTaskQList : std::uint8_t {
             Immediately = 0,
@@ -117,7 +120,7 @@ namespace Mus {
             return RevertNormalMap;
         }
         [[nodiscard]] inline auto GetUpdateDelayTick() const noexcept {
-            return UpdateDelayTick;
+            return static_cast<std::uint8_t>(GetRuntimeTuning()->updateDelayTick);
         }
 
         [[nodiscard]] inline auto GetApplyOverlay() const noexcept {
@@ -203,7 +206,8 @@ namespace Mus {
             return GPUForceSync;
         }
         [[nodiscard]] inline auto GetUpdateDistance() const noexcept {
-            return UpdateDistance;
+            const auto values = GetRuntimeTuning();
+            return values->updateDistance * values->updateDistance;
         }
         [[nodiscard]] inline auto GetUpdateDistanceVramSave() const noexcept {
             return UpdateDistanceVramSave;
@@ -263,15 +267,17 @@ namespace Mus {
             return RealtimeDetectOnBackGround;
         }
         [[nodiscard]] inline auto GetDetectDistance() const noexcept {
-            return DetectDistance;
+            const auto values = GetRuntimeTuning();
+            return values->detectDistance * values->detectDistance;
         }
         [[nodiscard]] inline auto GetDetectTickMS() const noexcept {
-            return DetectTickMS;
+            return static_cast<std::clock_t>(GetRuntimeTuning()->detectTickMS);
         }
         [[nodiscard]] inline auto GetDetectTextureChange() const noexcept {
             return DetectTextureChange;
         }
     protected:
+        RuntimeTuningStore runtimeTuning;
         //Debug
         spdlog::level::level_enum logLevel{ spdlog::level::level_enum::info };
         spdlog::level::level_enum flushLevel{ spdlog::level::level_enum::trace };
@@ -305,8 +311,6 @@ namespace Mus {
 
         bool RevertNormalMap = false;
 
-        std::uint8_t UpdateDelayTick = 1;
-
         bool ApplyOverlay = true;
 
         bool RemoveSkinOverrides = true;
@@ -339,7 +343,6 @@ namespace Mus {
         bool GPUEnable = true;
         std::int32_t GPUDeviceIndex = -1;
         bool GPUForceSync = false;
-        float UpdateDistance = 4096.0f * 4096.0f;
         bool UpdateDistanceVramSave = false;
 		bool UseMipMap = true;
 
@@ -361,8 +364,6 @@ namespace Mus {
         bool RealtimeDetect = true;
         std::uint8_t RealtimeDetectHead = 1; //0 disable, 1 morph data only, all data
         bool RealtimeDetectOnBackGround = false;
-        float DetectDistance = 512.0f * 512.0f;
-        std::clock_t DetectTickMS = 1000; //1sec
         bool DetectTextureChange = true;
 
     public:
@@ -427,7 +428,7 @@ namespace Mus {
 
         static inline void skipComments(std::string& str)
         {
-            auto pos = str.find("#");
+            auto pos = str.find_first_of("#;");
             if (pos != std::string::npos)
             {
                 str.erase(pos);
@@ -437,14 +438,14 @@ namespace Mus {
         static inline std::string GetConfigSetting(std::string line, std::string& variable)
         {
             std::string value = "";
-            std::vector<std::string> splittedLine = split(line, '=');
+            const auto equals = line.find('=');
             variable = "";
-            if (splittedLine.size() > 1)
+            if (equals != std::string::npos)
             {
-                variable = splittedLine[0];
+                variable = line.substr(0, equals);
                 trim(variable);
 
-                std::string valuestr = splittedLine[1];
+                std::string valuestr = line.substr(equals + 1);
                 trim(valuestr);
                 value = valuestr;
             }

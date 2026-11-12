@@ -26,7 +26,11 @@ namespace Mus
     }
 
     ThreadPool_ParallelModule::~ThreadPool_ParallelModule() {
-        stop.store(true);
+        {
+            // Publish stop under the wait predicate's mutex to avoid a lost wake.
+            std::lock_guard lock(queueMutex);
+            stop.store(true);
+        }
         cv.notify_all();
         for (auto& t : workers)
             if (t.joinable()) t.join();
@@ -58,24 +62,34 @@ namespace Mus
         : coreMask(a_coreMask)
         , stop(false), taskQTick(a_taskQTick)
         , directTaskQ(a_directTaskQ)
-        , runTask(true), running(false)
     {
         std::uint32_t threadCount = std::max(1u, a_threadSize);
-        for (std::uint8_t i = 0; i < threadCount; i++) {
-            lastTickTime.push_back(currentTime);
-            runTask.push_back(true);
-            running.push_back(false);
+        lastTickTime.resize(threadCount, currentTime.load());
+        runTask.resize(threadCount, true);
+        running.resize(threadCount, false);
+        for (std::uint32_t i = 0; i < threadCount; i++)
             workers.emplace_back([this, i] { workerLoop(i); });
-        }
         g_frameEventDispatcher.addListener(this);
     }
 
     ThreadPool_GPUTaskModule::~ThreadPool_GPUTaskModule() {
-        stop.store(true);
+        {
+            std::lock_guard lock(queueMutex);
+            stop.store(true);
+        }
         cv.notify_all();
         for (auto& t : workers)
             if (t.joinable()) t.join();
         g_frameEventDispatcher.removeListener(this);
+    }
+
+    void ThreadPool_GPUTaskModule::BeginDrain() {
+        {
+            std::lock_guard lock(queueMutex);
+            draining = true;
+        }
+        // Actor computations may still submit follow-up GPU work while draining.
+        cv.notify_all();
     }
 
     void ThreadPool_GPUTaskModule::workerLoop(std::uint32_t threadNum) {
@@ -87,7 +101,7 @@ namespace Mus
             {
                 std::unique_lock lock(queueMutex);
                 cv.wait(lock, [this, threadNum] {
-                    return stop.load() || (!tasks.empty() && (runTask[threadNum] || directTaskQ));
+                    return stop.load() || (!tasks.empty() && (draining || runTask[threadNum] || directTaskQ));
                 });
                 runTask[threadNum] = false;
                 running[threadNum] = true;
@@ -97,15 +111,19 @@ namespace Mus
                 tasks.pop();
             }
             task();
-            lastTickTime[threadNum] = currentTime;
-            running[threadNum] = false;
+            {
+                std::lock_guard lock(queueMutex);
+                lastTickTime[threadNum] = currentTime.load();
+                running[threadNum] = false;
+            }
         }
     }
 
     void ThreadPool_GPUTaskModule::onEvent(const FrameEvent& e)
     {
-        if (tasks.empty())
-            return;
+        if (directTaskQ) return;
+        std::lock_guard lock(queueMutex);
+        if (tasks.empty()) return;
         std::uint32_t notified = 0;
         for (std::uint32_t i = 0; i < GetThreads(); i++)
         {

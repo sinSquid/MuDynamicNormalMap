@@ -126,17 +126,17 @@ namespace Mus {
         }
 
         lString& remove_ends_with(const char* suffix) {
-            if (starts_with(suffix))
+            if (ends_with(suffix))
                 str = std::string(str.begin(), str.end() - std::strlen(suffix));
             return *this;
         }
         lString& remove_ends_with(const std::string& suffix) {
-            if (starts_with(suffix))
+            if (ends_with(suffix))
                 str = std::string(str.begin(), str.end() - suffix.size());
             return *this;
         }
         lString& remove_ends_with(const lString& suffix) {
-            if (starts_with(suffix))
+            if (ends_with(suffix))
                 str = std::string(str.begin(), str.end() - suffix.str.size());
             return *this;
         }

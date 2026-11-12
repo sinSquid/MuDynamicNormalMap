@@ -13,8 +13,7 @@ def gen_ispc():
     }
 
     if not os.path.exists(src_file):
-        print(f"{src_file} unable to get the file.")
-        return
+        raise FileNotFoundError(src_file)
 
     with open(src_file, "r", encoding="utf-8") as f:
         src_text = f.read()
@@ -62,6 +61,9 @@ def run_ispc():
             print(f"{target.upper()} build done")
         else:
             print(f"{target.upper()} failed to build")
+            print(result.stdout)
+            print(result.stderr)
+            raise subprocess.CalledProcessError(result.returncode, cmd)
 
 def main():
     gen_ispc()

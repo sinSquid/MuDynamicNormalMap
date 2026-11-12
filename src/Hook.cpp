@@ -43,7 +43,7 @@ namespace Mus {
 	REL::Relocation<_ArmorAttachFunction> onArmorAttachFunction_Orig(ArmorAttachFunction);
 	RE::NiAVObject* __fastcall onArmorAttachFunction(void* unk1, RE::NiNode* armor, RE::NiNode* skeleton, std::int32_t bipedSlot, void* unk4, void* unk5, void* unk6, void* unk7, char unk8, int unk9, void* unk10)
 	{
-		ArmorAttachEvent e;
+		ArmorAttachEvent e{};
 		if (skeleton)
 			e.actor = skyrim_cast<RE::Actor*>(skeleton->GetUserData());
 		e.armor = armor;

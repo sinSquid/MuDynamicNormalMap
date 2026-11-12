@@ -90,7 +90,7 @@ namespace Mus {
         struct Edge {
             std::uint32_t v0, v1;
             std::size_t operator()() const {
-                return (static_cast<std::size_t>(v0) << 32) | v1;
+                return (static_cast<std::size_t>(std::min(v0, v1)) << 32) | std::max(v0, v1);
             }
             bool operator<(const Edge& other) const {
                 return (*this)() < other();

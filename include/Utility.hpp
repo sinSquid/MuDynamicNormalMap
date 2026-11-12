@@ -319,7 +319,7 @@ namespace Mus {
         return result ? result : nullptr;
     }
 
-    inline std::string GetHexStr(std::uint32_t a_value)
+    inline std::string GetHexStr(std::uint64_t a_value)
     {
         std::stringstream hex;
         hex << std::hex << a_value;
@@ -368,8 +368,13 @@ namespace Mus {
     inline bool IsExistFileInFileSystem(const lString& path) {
         if (path.empty())
             return false;
-        std::filesystem::path fullPath = path.starts_with("Data") ? GetRuntimeDataDirectory() + path.string() : path.string();
-        return std::filesystem::exists(fullPath);
+        lString relative = path;
+        relative.remove_starts_with("Data\\");
+        std::filesystem::path fullPath = relative.string();
+        if (!fullPath.is_absolute())
+            fullPath = std::filesystem::path(GetRuntimeDataDirectory()) / fullPath;
+        std::error_code ec;
+        return std::filesystem::is_regular_file(fullPath, ec);
     }
     inline bool IsExistFileInStream_Impl(lString path) {
         RE::BSResourceNiBinaryStream binaryStream(path.c_str());
@@ -389,30 +394,22 @@ namespace Mus {
         if (path.empty())
             return false;
         path.remove_starts_with("Data\\");
+        if (!path.starts_with("meshes\\") && !path.starts_with("textures\\")) {
+            if (type == ExistType::meshes)
+                path = "meshes\\" + path;
+            else if (type == ExistType::textures)
+                path = "textures\\" + path;
+        }
+        // A loose-file check cannot borrow a successful archive lookup.
+        // Recheck loose files and misses so a reload can discover new files.
+        if (inFileSystem)
+            return IsExistFileInFileSystem(path);
         static tbb::concurrent_unordered_map<lString, bool> isExists;
         if (auto it = isExists.find(path); it != isExists.end())
             return it->second;
-        bool result = false;
-        if (!inFileSystem) {
-            if (path.starts_with("meshes") || path.starts_with("textures") || type != ExistType::none)
-                result = IsExistFileInStream(path, type);
-            else if (type == ExistType::meshes)
-                result = IsExistFileInStream("meshes\\" + path);
-            else if (type == ExistType::textures)
-                result = IsExistFileInStream("textures\\" + path);
-            else
-                result = IsExistFileInStream(path, type);
-        } else {
-            if (path.starts_with("meshes") || path.starts_with("textures")) {
-                result = IsExistFileInFileSystem(path);
-            } else if (type == ExistType::meshes)
-                result = IsExistFileInFileSystem("meshes\\" + path);
-            else if (type == ExistType::textures)
-                result = IsExistFileInFileSystem("textures\\" + path);
-            else
-                result = IsExistFileInFileSystem(path);
-        }
-        isExists[path] = result;
+        const bool result = IsExistFileInStream(path);
+        if (result)
+            isExists.emplace(path, true);
         return result;
     }
 
@@ -481,13 +478,13 @@ namespace Mus {
         DWORD datalen = GetFileVersionInfoSize(string2wstring(fileName).c_str(), handle);
         if (datalen == 0)
             return 0;
-        BYTE* data = new BYTE[datalen];
+        std::vector<BYTE> data(datalen);
         DWORD handleinfo = 0;
-        if (!GetFileVersionInfoW(string2wstring(fileName).c_str(), handleinfo, datalen, data))
+        if (!GetFileVersionInfoW(string2wstring(fileName).c_str(), handleinfo, datalen, data.data()))
             return 0;
         std::uint32_t verlen = 0;
         VS_FIXEDFILEINFO* verinfo = nullptr;
-        if (!VerQueryValue(data, L"\\", (void**)&verinfo, &verlen))
+        if (!VerQueryValue(data.data(), L"\\", (void**)&verinfo, &verlen) || !verinfo || verlen < sizeof(VS_FIXEDFILEINFO))
             return 0;
         std::uint32_t version0 = HIWORD(verinfo->dwFileVersionMS);
         std::uint32_t version1 = LOWORD(verinfo->dwFileVersionMS);
@@ -498,8 +495,10 @@ namespace Mus {
 
     inline std::string removeFileNameExtention(std::string s)
     {
-        s.erase(std::find_if(s.rbegin(), s.rend(),
-                             [](char c) {return c == '.'; }).base() - 1, s.end());
+        const auto dot = s.find_last_of('.');
+        const auto slash = s.find_last_of("/\\");
+        if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+            s.erase(dot);
         return s;
     }
 
@@ -728,7 +727,7 @@ namespace Mus {
             return;
 
         using namespace std::chrono;
-		static std::unordered_map<std::string, high_resolution_clock::time_point> funcTime;
+		static std::unordered_map<std::string, std::unordered_map<std::thread::id, high_resolution_clock::time_point>> funcTime;
 		static std::unordered_map<std::string, long long> funcAverageTime;
 		static std::unordered_map<std::string, unsigned long> funcAverageCount;
 		static std::unordered_map<std::string, std::uint32_t> funcAverageArgs;
@@ -737,12 +736,27 @@ namespace Mus {
         std::lock_guard<std::mutex> lg(performanceLogLock);
         if (!isEnd)
         {
-            funcTime[funcStr] = high_resolution_clock::now();
+            // Repeated starts after a caller's early return replace that thread's sample.
+            funcTime[funcStr][std::this_thread::get_id()] = high_resolution_clock::now();
         }
         else
         {
             auto end = high_resolution_clock::now();
-            auto duration_ns = duration_cast<nanoseconds>(end - funcTime[funcStr]).count();
+            auto found = funcTime.find(funcStr);
+            if (found == funcTime.end() || found->second.empty())
+                return;
+            auto sample = found->second.find(std::this_thread::get_id());
+            if (sample == found->second.end()) {
+                // Actor update spans and the single-flight detector finish on another thread.
+                // Only a unique pending sample can be matched without mixing concurrent calls.
+                if (found->second.size() != 1)
+                    return;
+                sample = found->second.begin();
+            }
+            auto duration_ns = duration_cast<nanoseconds>(end - sample->second).count();
+            found->second.erase(sample);
+            if (found->second.empty())
+                funcTime.erase(found);
             double tick = PerformanceCheckTick ? (double)(RE::GetSecondsSinceLastFrame() * 1000000000) : (double)(TimeTick60 * 1000000000);
             if (isAverage)
             {
@@ -753,7 +767,7 @@ namespace Mus {
                 {
 					auto average = (double)funcAverageTime[funcStr] / funcAverageCount[funcStr];
                     auto unit = "ns";
-                    double duration = 0;
+                    double duration = average;
                     if (average >= 1000000)
                     {
                         duration = (double)average / 1000000;
@@ -773,7 +787,7 @@ namespace Mus {
                     {
                         auto Console = RE::ConsoleLog::GetSingleton();
                         if (Console)
-                            Console->Print("%s average time: %lld%s%s=> %.6f%%", funcStr.c_str(), duration, unit,
+                            Console->Print("%s average time: %.6f%s%s=> %.6f%%", funcStr.c_str(), duration, unit,
                                            funcAverageArgs[funcStr] > 0 ? (std::string(" with average count ") + std::to_string(funcAverageArgs[funcStr] / funcAverageCount[funcStr]) + " ").c_str() : " ",
                                            (double)duration / tick * 100);
                     }
@@ -785,7 +799,7 @@ namespace Mus {
             else
             {
                 auto unit = "ns";
-                double duration = 0;
+                double duration = static_cast<double>(duration_ns);
                 if (duration_ns >= 1000000)
                 {
                     duration = (double)duration_ns / 1000000;
@@ -847,7 +861,7 @@ namespace Mus {
         std::vector<bSlot> slots;
         for (int i = 0; i < 32; ++i) {
             if (bipedSlots & (1u << i)) {
-                slots.push_back(1 << i);
+                slots.push_back(static_cast<bSlot>(i));
             }
         }
         return slots;

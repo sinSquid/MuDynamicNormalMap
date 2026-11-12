@@ -11,7 +11,7 @@ namespace Mus {
 		}
 	}
 
-	bool ConditionManager::ConditionCheck(RE::Actor* a_actor, Condition condition)
+	bool ConditionManager::ConditionCheck(RE::Actor* a_actor, const Condition& condition)
 	{
 		if (!std::ranges::all_of(condition.AND, [&](auto& AND)
 			{
@@ -31,6 +31,7 @@ namespace Mus {
 
 	const ConditionManager::Condition ConditionManager::GetCondition(RE::Actor* a_actor)
 	{
+		std::shared_lock sl(ConditionListLock);
 		for (auto& condition : ConditionList)
 		{
 			if (ConditionCheck(a_actor, condition))

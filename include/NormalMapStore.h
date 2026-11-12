@@ -1,12 +1,14 @@
 #pragma once
+#include "DiskWriteQueue.h"
+#include <future>
 
 namespace Mus{
 	class NormalMapStore :
 		public IEventListener<FrameEvent>, 
 		public IEventListener<QuitGameEvent> {
 	public:
-		NormalMapStore() {};
-		~NormalMapStore() { ClearDiskCache(); };
+		NormalMapStore();
+		~NormalMapStore();
 
 		[[nodiscard]] static NormalMapStore& GetSingleton() {
 			static NormalMapStore instance;
@@ -14,6 +16,7 @@ namespace Mus{
 		}
 
 		void Init();
+        bool HasPendingDiskWrites() const { return diskWriter.Busy(); }
 
 		void AddResource(std::uint64_t a_hash, TextureResourcePtr a_resource);
 		bool GetResource(std::uint64_t a_hash, TextureResourcePtr& a_resource, bool& isDiskCache);
@@ -35,6 +38,13 @@ namespace Mus{
 		void onEvent(const QuitGameEvent& e) override;
 
 	private:
+        void ShutdownDiskWrites();
+        void WaitForMemoryCleanup() noexcept;
+        std::future<void> memoryCleanup;
+        bool stoppingMemoryCleanup = false; // Frame/quit/destruction thread only.
+        static std::uint64_t EstimateDiskWriteBytes(const TextureResourcePtr& resource);
+        std::mutex diskLifecycleLock;
+        DiskWriteQueue<TextureResourcePtr> diskWriter;
 		const std::string diskCacheExtension = ".mdncache";
 		std::clock_t lastTickTime = 0;
 
@@ -48,17 +58,20 @@ namespace Mus{
 		std::mutex lock;
 		std::unordered_map<std::uint64_t, TextureResourcePtr> map;
 
-		std::mutex diskCacheLock;
+		std::recursive_mutex diskIOLock; // Serialize file transactions, reads and eviction.
+        std::mutex diskCacheLock;
 		struct DiskCacheInfo {
 			std::clock_t lastAccessTime = 0;
-			std::uint32_t mipLevels;
+			std::uint32_t mipLevels = 0;
 			std::vector<std::uint32_t> rowPitch;
-			D3D11_TEXTURE2D_DESC texDesc;
-			D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
+			D3D11_TEXTURE2D_DESC texDesc{};
+			D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
 		};
         typedef std::unordered_map<std::uint64_t, DiskCacheInfo> DiskCacheInfoMap;
         DiskCacheInfoMap diskCacheInfoMap;
 		void UpdateAccessTime(std::uint64_t a_hash);
+        static bool ValidateDiskCacheInfo(const DiskCacheInfo& info);
+        static std::uint64_t MipByteSize(const DiskCacheInfo& info, std::uint32_t mip);
 
 		inline std::uint64_t GetSizeAsMB(std::uint64_t fileSize) {
 			return fileSize >> 20;

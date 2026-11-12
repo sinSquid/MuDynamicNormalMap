@@ -106,6 +106,7 @@ namespace Mus {
         ThreadPool_GPUTaskModule() = delete;
         ThreadPool_GPUTaskModule(std::uint32_t a_threadSize, std::uint64_t a_coreMask, std::clock_t a_taskQTick, bool a_directTaskQ);
         ~ThreadPool_GPUTaskModule();
+        void BeginDrain();
 
         template<typename F, typename... Args>
         auto submitAsync(F&& f, Args&&... args)
@@ -139,6 +140,7 @@ namespace Mus {
 
         const std::clock_t taskQTick = 0;
         const bool directTaskQ = false;
+        bool draining = false; // Protected by queueMutex; quit ignores frame pacing.
 
         std::vector<std::clock_t> lastTickTime;
         std::vector<bool> runTask;

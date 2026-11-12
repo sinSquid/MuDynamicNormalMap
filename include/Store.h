@@ -21,7 +21,7 @@ namespace Mus {
 
 	static OverrideInterfaceAPI* overrideInterfaceAPI = new OverrideInterfaceAPI();
 
-	extern std::clock_t currentTime;
+	extern std::atomic<std::clock_t> currentTime;
 
 	constexpr double PI = 3.14159265358979323846;
 	constexpr float toDegree = 180.0 / PI;

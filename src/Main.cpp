@@ -1,4 +1,6 @@
 
+#include "SettingsMenu.h"
+
 namespace {
     /**
      * Setup logging.
@@ -177,6 +179,9 @@ namespace {
 		Mus::g_actorChangeHeadPartEventDispatcher.addListener(&Mus::TaskManager::GetSingleton());
 
 		Mus::g_quitGameEventDispatcher.addListener(&Mus::NormalMapStore::GetSingleton());
+		Mus::g_quitGameEventDispatcher.addListener(&Mus::ActorVertexHasher::GetSingleton());
+		Mus::g_quitGameEventDispatcher.addListener(&Mus::TaskManager::GetSingleton());
+		Mus::g_quitGameEventDispatcher.addListener(&Mus::ObjectNormalMapUpdater::GetSingleton());
 
         Mus::TaskManager::GetSingleton().Init();
         Mus::ObjectNormalMapUpdater::GetSingleton().Init();
@@ -199,6 +204,7 @@ namespace {
                     kPostLoadFunction();
                     break;
                 case SKSE::MessagingInterface::kPostPostLoad: // Called after all kPostLoad message handlers have run.
+                    Mus::SettingsMenu::Register();
                     break;
                 case SKSE::MessagingInterface::kInputLoaded: // Called when all game data has been found.
                     break;

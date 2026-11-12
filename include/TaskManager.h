@@ -1,9 +1,12 @@
 #pragma once
 #include "AsyncWork.h"
+#include "GeometryRetry.h"
+#include <future>
 
 namespace Mus {
 	class TaskManager :
 		public IEventListener<FrameEvent>,
+		public IEventListener<QuitGameEvent>,
 		public IEventListener<FacegenNiNodeEvent>,
 		public IEventListener<ActorChangeHeadPartEvent>,
 		public IEventListener<ArmorAttachEvent>,
@@ -12,7 +15,7 @@ namespace Mus {
 		public RE::BSTEventSink<RE::InputEvent*> {
 	public:
 		TaskManager() {};
-		~TaskManager() {};
+		~TaskManager();
 
 		[[nodiscard]] static TaskManager& GetSingleton() {
 			static TaskManager instance;
@@ -74,13 +77,14 @@ namespace Mus {
 
 		bool QUpdateNormalMap(RE::Actor* a_actor, bSlotbit bipedSlot = BipedObjectSlot::kAll);
 
-		bool QUpdateNormalMapImpl(RE::Actor* a_actor, bSlotbit bipedSlot);
+		bool QUpdateNormalMapImpl(RE::Actor* a_actor, GeometryList a_srcGeometies, bSlotbit bipedSlot);
 		void QUpdateNormalMapImpl(RE::FormID a_actorID, std::string a_actorName, GeometryDataPtr a_geoData, UpdateSet& a_updateSet, RE::NiPointer<RE::NiAVObject> sourceRoot);
 
 		void RunManageResource(bool isImminently);
 		bool RemoveNormalMap(RE::Actor* a_actor);
 	protected:
 		void onEvent(const FrameEvent& e) override;
+        void onEvent(const QuitGameEvent& e) override;
 		void onEvent(const FacegenNiNodeEvent& e) override;
 		void onEvent(const ActorChangeHeadPartEvent& e) override;
 		void onEvent(const ArmorAttachEvent& e) override;
@@ -89,7 +93,14 @@ namespace Mus {
 		EventResult ProcessEvent(const RE::MenuOpenCloseEvent* evn, RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override;
 
 	private:
+        void WaitForComputations();
+        void PruneCompletedComputations();
+        std::atomic<bool> stoppingComputations = false;
+        std::vector<std::future<void>> pendingComputations;
 		FrameTaskQueue delayTasks;
+        GeometryRetry geometryRetry;
+        RE::FormID lastScanActor = 0;
+        std::vector<std::function<void()>> deferredCallbacks;
 
 		bool isPressedHotKey1 = false;
 		bool isResetTasks = false;
@@ -115,7 +126,7 @@ namespace Mus {
 
 		std::string FixTexturePath(std::string texturePath);
 
-		typedef std::unordered_map<RE::FormID, bSlotbit> UpdateSlotQueue;
+		typedef std::map<RE::FormID, bSlotbit> UpdateSlotQueue;
         UpdateSlotQueue updateSlotQueue;
         mutable std::mutex updateSlotQueueLock;
 
@@ -131,13 +142,15 @@ namespace Mus {
             return it != isActiveActors.end() ? it->second : false;
         }
 
-        tbb::concurrent_unordered_map<RE::FormID, bool> isUpdating;
+        std::shared_ptr<ActorWorkState> actorWorkState = std::make_shared<ActorWorkState>();
+        inline bool HasPendingUpdates() const {
+            return actorWorkState->Any();
+        }
         inline void SetIsUpdating(RE::FormID a_actorID, bool a_isUpdating) {
-            isUpdating[a_actorID] = a_isUpdating;
+            actorWorkState->Set(a_actorID, a_isUpdating);
         }
         inline bool GetIsUpdating(RE::FormID a_actorID) const {
-            auto it = isUpdating.find(a_actorID);
-            return it != isUpdating.end() ? it->second : false;
+            return actorWorkState->Contains(a_actorID);
         }
 
 		class LastNormalMapData {
@@ -149,13 +162,17 @@ namespace Mus {
 			LastNormalMapData& operator=(const LastNormalMapData&) = delete;
 
             LastNormalMapData(const bSlot a_slot, const std::string& a_textureName) : slot(a_slot), textureName(a_textureName) {};
-            LastNormalMapData(LastNormalMapData&& other) noexcept : slot(other.slot), textureName(other.textureName) {
+            LastNormalMapData(LastNormalMapData&& other) noexcept : slot(other.slot), textureName(std::move(other.textureName)) {
                 other.textureName = "";
             };
             LastNormalMapData& operator=(LastNormalMapData&& other) noexcept {
-                slot = other.slot;
-                textureName = other.textureName;
-                other.textureName = "";
+                if (this != &other) {
+                    if (!textureName.empty()) Shader::TextureLoadManager::GetSingleton().ReleaseNiTexture(textureName);
+                    slot = other.slot;
+                    textureName = std::move(other.textureName);
+                    other.textureName.clear();
+                }
+                return *this;
             };
 
 			bool Is(const bSlot other) const { 

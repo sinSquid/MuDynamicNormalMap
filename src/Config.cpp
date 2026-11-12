@@ -1,4 +1,6 @@
 #include "Config.h"
+#include <charconv>
+#include <string_view>
 
 namespace Mus {
     bool Config::LoadLogging()
@@ -24,6 +26,7 @@ namespace Mus {
         std::string currentSetting;
         while (std::getline(file, line))
         {
+            if (line.starts_with("\xef\xbb\xbf")) line.erase(0, 3);
             //trim(line);
             skipComments(line);
             trim(line);
@@ -76,10 +79,21 @@ namespace Mus {
 
     bool Config::LoadConfig(std::ifstream& configfile)
     {
+        if (!configfile.is_open() || !configfile.good()) return false;
+        RuntimeTuning values = *GetRuntimeTuning();
+        const auto parseRuntimeValue = [](const std::string& key, const std::string& text, auto& value) {
+            std::string_view number(text);
+            if (number.starts_with('+')) number.remove_prefix(1);
+            const auto parsed = std::from_chars(number.data(), number.data() + number.size(), value);
+            if (parsed.ec == std::errc{} && parsed.ptr == number.data() + number.size()) return true;
+            logger::error("Invalid runtime setting {}: {}", key, text);
+            return false;
+        };
         std::string line;
         std::string currentSetting;
         while (std::getline(configfile, line))
         {
+            if (line.starts_with("\xef\xbb\xbf")) line.erase(0, 3);
             //trim(line);
             skipComments(line);
             trim(line);
@@ -200,7 +214,7 @@ namespace Mus {
                 }
                 else if (variableName == "UpdateDelayTick")
                 {
-                    UpdateDelayTick = GetUIntValue(variableValue);
+                    if (!parseRuntimeValue(variableName, variableValue, values.updateDelayTick)) return false;
                 }
                 else if (variableName == "ApplyOverlay")
                 {
@@ -313,8 +327,7 @@ namespace Mus {
                 }
                 else if (variableName == "UpdateDistance")
                 {
-                    float value = GetFloatValue(variableValue);
-                    UpdateDistance = value * value;
+                    if (!parseRuntimeValue(variableName, variableValue, values.updateDistance)) return false;
                 }
                 else if (variableName == "UpdateDistanceVramSave")
                 {
@@ -377,7 +390,7 @@ namespace Mus {
                 else if (variableName == "DiskCacheHashPrecision")
                 {
                     std::uint32_t precision = GetUIntValue(variableValue);
-                    DiskCacheHashPrecision = 1 << precision;
+                    DiskCacheHashPrecision = static_cast<float>(1u << std::min(precision, 30u));
                 }
             }
             else if (currentSetting == "[RealtimeDetect]")
@@ -396,12 +409,11 @@ namespace Mus {
                 }
                 else if (variableName == "DetectDistance")
                 {
-                    float value = GetFloatValue(variableValue);
-                    DetectDistance = value * value;
+                    if (!parseRuntimeValue(variableName, variableValue, values.detectDistance)) return false;
                 }
                 else if (variableName == "DetectTickMS")
                 {
-                    DetectTickMS = GetIntValue(variableValue);
+                    if (!parseRuntimeValue(variableName, variableValue, values.detectTickMS)) return false;
                 }
                 else if (variableName == "DetectTextureChange")
                 {
@@ -409,10 +421,13 @@ namespace Mus {
                 }
             }
         }
-        if (UpdateDistance > floatPrecision && DetectDistance > floatPrecision)
-            UpdateDistance = std::max(DetectDistance, UpdateDistance);
-        else
-            UpdateDistance = 0.0f;
+        if (configfile.bad()) return false;
+        // Validate raw values before normalizing ranges, then publish the four keys together.
+        std::string runtimeError;
+        if (!ApplyRuntimeTuning(values, runtimeError)) {
+            logger::error("Unable to load runtime tuning: {}", runtimeError);
+            return false;
+        }
         return true;
     }
 
@@ -431,12 +446,12 @@ namespace Mus {
                     std::u8string filename_utf8 = file.filename().u8string();
                     std::string filename(filename_utf8.begin(), filename_utf8.end());
                     if (filename == "." || filename == "..")
-                        return;
+                        continue;
                     if (!stringEndsWith(filename, ".ini"))
-                        return;
+                        continue;
                     std::ifstream ifile(file);
                     if (!ifile.is_open())
-                        return;
+                        continue;
 
                     logger::info("File found: {}", filename);
 
@@ -548,6 +563,7 @@ namespace Mus {
         if (SIMDType_ != SIMDType::noSIMD && !scan)
             return SIMDType_;
 
+        SIMDType_ = SIMDType::noSIMD;
         int info[4] = {};
         auto configSIMD = Config::GetSingleton().GetSIMDtype();
         if (configSIMD <= 0)

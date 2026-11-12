@@ -55,6 +55,9 @@ set(headers
         include/ActorVertexHasher.h
         include/NormalMapStore.h
         include/Condition.h
+        include/RuntimeTuning.h
+        include/SettingsMenu.h
+        include/IniConfig.h
 )
 
 set(sources
@@ -72,6 +75,8 @@ set(sources
         src/NormalMapStore.cpp
         src/Condition.cpp
         src/ThreadPool.cpp
+        src/SettingsMenu.cpp
+        src/IniConfig.cpp
         src/Main.cpp
 
         ${CMAKE_CURRENT_BINARY_DIR}/version.rc
@@ -100,7 +105,11 @@ find_package(tinygltf)
 execute_process(
     COMMAND python "${CMAKE_SOURCE_DIR}/include/bc7e_ispc__gen.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/include/"
+    RESULT_VARIABLE MU_ISPC_RESULT
 )
+if(NOT MU_ISPC_RESULT EQUAL 0)
+    message(FATAL_ERROR "ISPC generation failed; refusing to link previous compression objects")
+endif()
 
 add_commonlibsse_plugin(${PROJECT_NAME} SOURCES ${headers} ${sources})
 add_library("${PROJECT_NAME}::${PROJECT_NAME}" ALIAS "${PROJECT_NAME}")

@@ -1,6 +1,21 @@
 #include "ActorVertexHasher.h"
 
 namespace Mus {
+    ActorVertexHasher::~ActorVertexHasher() {
+        WaitForPendingDetection();
+    }
+
+    void ActorVertexHasher::WaitForPendingDetection() {
+        // The callback takes actor locks itself; never hold them while waiting.
+        if (pendingDetection.valid())
+            pendingDetection.wait();
+    }
+
+    void ActorVertexHasher::onEvent(const QuitGameEvent& e) {
+        detectionStopped.store(true);
+        WaitForPendingDetection();
+    }
+
 	void ActorVertexHasher::Init()
 	{
 
@@ -8,6 +23,8 @@ namespace Mus {
 
 	void ActorVertexHasher::onEvent(const FrameEvent& e)
 	{
+		if (detectionStopped.load())
+            return;
 		static std::clock_t lastTickTime = currentTime;
 
 		if (IsSaveLoading.load() || IsInLoading.load())
@@ -119,7 +136,9 @@ namespace Mus {
 		const std::string funcName = __func__;
 		auto cameraPosition = camera->GetRuntimeData2().pos;
 
-		auto actorHashFunc = [&, funcName, cameraPosition](const RE::FormID& id, GeometryHashData& data) {
+        const auto tuning = Config::GetSingleton().GetRuntimeTuning();
+        const float detectDistanceSquared = tuning->detectDistance * tuning->detectDistance;
+		auto actorHashFunc = [&, funcName, cameraPosition, tuning, detectDistanceSquared](const RE::FormID& id, GeometryHashData& data) {
 			RE::NiPointer<RE::Actor> actor = RE::NiPointer(GetFormByID<RE::Actor*>(id));
             if (IsInvalidActor(actor.get()))
 			{
@@ -130,7 +149,7 @@ namespace Mus {
 
 			if (IsBlocked(actor->formID))
 				return true;
-			if (!IsPlayer(actor->formID) && (Config::GetSingleton().GetDetectDistance() > floatPrecision && cameraPosition.GetSquaredDistance(actor->loadedData->data3D->world.translate) > Config::GetSingleton().GetDetectDistance()))
+			if (!IsPlayer(actor->formID) && (detectDistanceSquared > floatPrecision && cameraPosition.GetSquaredDistance(actor->loadedData->data3D->world.translate) > detectDistanceSquared))
                 return true;
             if (!GetHash(actor.get(), data.hash))
                 return true;
@@ -180,7 +199,10 @@ namespace Mus {
                 blockActors.clear();
             }
 
-			backGroundWorkerThreads->submitAsync([this, actorHashFunc, funcName, ticket = std::move(ticket)]() {
+			pendingDetection = backGroundWorkerThreads->submitAsync([this, actorHashFunc, funcName, ticket = std::move(ticket)]() mutable {
+                // A retained future owns its packaged callable. Release the ticket
+                // on invocation exit instead of waiting for that callable to die.
+                auto activeTicket = std::move(ticket);
 				{
                     std::lock_guard lg(actorHashLock);
                     for (auto it = actorHash.begin(); it != actorHash.end();)
@@ -205,6 +227,12 @@ namespace Mus {
 			if (Config::GetSingleton().GetActorVertexHasherTime1())
 				PerformanceLog(std::string(__func__), false, true);
 
+            // Blocks invalidate a detection pass, not every future pass.
+            // Clear before scanning so events raised during this pass still block it.
+            {
+                std::lock_guard lg(blockActorsLock);
+                blockActors.clear();
+            }
             std::lock_guard lg(actorHashLock);
             tbb::concurrent_vector<RE::FormID> garbages;
             tbb::parallel_for_each(actorHash, [&](auto& map) {
