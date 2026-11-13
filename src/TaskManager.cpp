@@ -10,6 +10,16 @@ namespace Mus {
         return !(sex == RE::SEX::kMale && !tuning->MaleEnable) &&
                !(sex == RE::SEX::kFemale && !tuning->FemaleEnable);
     }
+    bool TaskManager::IsActorInRange(RE::Actor* actor) const {
+        if (IsInvalidActor(actor)) return false;
+        if (IsPlayer(actor->formID)) return true;
+        const auto tuning = Config::GetSingleton().GetRuntimeTuning();
+        const float distance = tuning->updateDistance * tuning->updateDistance;
+        if (distance <= floatPrecision) return true;
+        const auto camera = RE::PlayerCamera::GetSingleton();
+        return camera && camera->GetRuntimeData2().pos.GetSquaredDistance(
+            actor->loadedData->data3D->world.translate) <= distance;
+    }
     void TaskManager::QueueMenuApply(const RuntimeTuning& tuning, MenuApplyCompletion completion) {
         if (stoppingComputations.load() || pendingMenuApply) {
             completion(false, "已有配置正在应用，或游戏正在退出。");
@@ -33,12 +43,27 @@ namespace Mus {
         if (completion) completion(success, status);
     }
 
-    void TaskManager::RefreshRegisteredActors() {
+    void TaskManager::RefreshRegisteredActors(bool discoverLoaded) {
         std::vector<RE::FormID> actors;
         {
             std::shared_lock lock(isActiveActorsLock);
             actors.reserve(isActiveActors.size());
             for (const auto& [id, active] : isActiveActors) actors.push_back(id);
+        }
+        // This is an explicit menu-apply pass on the main thread, never a frame scan.
+        // Include actors which were already loaded before a disabled category was enabled.
+        if (discoverLoaded) {
+            if (auto world = RE::TES::GetSingleton()) {
+                world->ForEachReference([&actors](RE::TESObjectREFR* reference) {
+                    if (auto actor = skyrim_cast<RE::Actor*>(reference); !IsInvalidActor(actor))
+                        actors.push_back(actor->formID);
+                    return RE::BSContainer::ForEachResult::kContinue;
+                });
+            }
+            if (auto player = RE::PlayerCharacter::GetSingleton(); !IsInvalidActor(player))
+                actors.push_back(player->formID);
+            std::sort(actors.begin(), actors.end());
+            actors.erase(std::unique(actors.begin(), actors.end()), actors.end());
         }
         { std::lock_guard lock(updateSlotQueueLock); updateSlotQueue.clear(); }
         ActorVertexHasher::GetSingleton().ResetRegistrations();
@@ -126,7 +151,9 @@ namespace Mus {
                 if (regenerate && !updater.Init()) {
                     throw std::runtime_error("无法重新建立法线生成资源");
                 }
-                if (regenerate) RefreshRegisteredActors();
+                if (regenerate) RefreshRegisteredActors(
+                    (!before->PlayerEnable && desired.PlayerEnable) || (!before->NPCEnable && desired.NPCEnable) ||
+                    (!before->MaleEnable && desired.MaleEnable) || (!before->FemaleEnable && desired.FemaleEnable));
             }
             if (desired.HotKey1 != before->HotKey1 || desired.HotKey2 != before->HotKey2) {
                 isPressedHotKey1 = false;
@@ -292,133 +319,105 @@ namespace Mus {
 			return;
 		auto cameraPosition = camera->GetRuntimeData2().pos;
 
-        const auto tuning = Config::GetSingleton().GetRuntimeTuning();
-        const float updateDistance = tuning->updateDistance * tuning->updateDistance;
-        // Re-evaluate actors when switching from a finite range to unlimited as well.
-        {
-            const bool vramSave = Config::GetSingleton().GetUpdateDistanceVramSave();
-            std::vector<std::function<void()>> queues;
+        // Persistent ordered registries allow bounded maintenance without copying the
+        // entire population or reinserting busy/cooling requests on every frame.
+        const auto distanceStart = GeometryRetry::Clock::now();
+        std::size_t distanceCount;
+        { std::shared_lock lock(isActiveActorsLock); distanceCount = std::min<std::size_t>(32, isActiveActors.size()); }
+        for (std::size_t i = 0; i < distanceCount; ++i) {
+            if (i && GeometryRetry::Clock::now() - distanceStart >= std::chrono::milliseconds(2)) break;
+            RE::FormID id;
+            bool wasActive;
             {
-                std::lock_guard lg(isActiveActorsLock);
-                for (auto it = isActiveActors.begin(); it != isActiveActors.end();)
-                {
-                    RE::Actor* actor = GetFormByID<RE::Actor*>(it->first);
-                    if (IsInvalidActor(actor))
-                    {
-                        const auto actorID = it->first;
-                        it = isActiveActors.erase(it);
-                        RemoveLastNormalMap(actorID);
-                        geometryRetry.Forget(actorID);
-                        continue;
-                    }
-					if (IsPlayer(actor->formID))
-					{
-                        it->second = true;
-                        it++;
-                        continue;
-					}
-                    bool isInRange = false;
-                    if (updateDistance <= floatPrecision)
-                    {
-                        isInRange = true;
-                    }
-                    else
-                    {
-                        isInRange = cameraPosition.GetSquaredDistance(actor->loadedData->data3D->world.translate) <= updateDistance;
-                    }
-                    if (it->second != isInRange)
-                    {
-                        if (!isInRange)
-                        {
-                            if (vramSave)
-                            {
-                                if (IsExistLastNormalMap(actor->formID))
-                                {
-                                    if (GetIsUpdating(actor->formID))
-                                    {
-                                        it++;
-                                        continue;
-                                    }
-                                    RemoveNormalMap(actor);
-                                }
-                            }
-                        }
-                        else
-                        {
-                            queues.push_back([this, actor]() { QUpdateNormalMap(actor); });
-                        }
-                        it->second = isInRange;
-                    }
-                    it++;
-                }
+                std::unique_lock lock(isActiveActorsLock);
+                if (isActiveActors.empty()) break;
+                auto it = isActiveActors.upper_bound(lastDistanceActor);
+                if (it == isActiveActors.end()) it = isActiveActors.begin();
+                id = lastDistanceActor = it->first;
+                wasActive = it->second;
             }
-            for (auto& q : queues)
-            {
-                q();
-			}
+            auto actor = GetFormByID<RE::Actor*>(id);
+            if (IsInvalidActor(actor)) {
+                { std::unique_lock lock(isActiveActorsLock); isActiveActors.erase(id); }
+                RemoveLastNormalMap(id);
+                geometryRetry.Forget(id);
+                continue;
+            }
+            const bool inRange = IsActorInRange(actor);
+            SetIsActiveActor(id, inRange);
+            // Check independently of the old active bit: enabling VRAM saving must
+            // also release maps of actors that were already outside the range.
+            if (!inRange && Config::GetSingleton().GetUpdateDistanceVramSave() &&
+                !GetIsUpdating(id) && IsExistLastNormalMap(id)) RemoveNormalMap(actor);
+            if (inRange && !wasActive) QUpdateNormalMap(actor);
         }
 
-        UpdateSlotQueue updateSlotQueue_;
-        {
-            std::lock_guard lg(updateSlotQueueLock);
-            updateSlotQueue_ = std::move(updateSlotQueue);
-        }
-
-        // Live scene graphs and NiTexture writes stay on the frame thread.
-        // Round-robin bounds per-frame scans without starving deferred actors.
         const auto scanStart = GeometryRetry::Clock::now();
         unsigned scans = 0;
-        std::vector<std::pair<RE::FormID, bSlotbit>> ordered;
-        auto split = updateSlotQueue_.upper_bound(lastScanActor);
-        ordered.insert(ordered.end(), split, updateSlotQueue_.end());
-        ordered.insert(ordered.end(), updateSlotQueue_.begin(), split);
-        for (auto& map : ordered) {
-                RE::Actor* actor = GetFormByID<RE::Actor*>(map.first);
-                if (IsInvalidActor(actor)) {
-                    geometryRetry.Forget(map.first);
-                    continue;
+        // Alternate priority frames with an unconditional round-robin first turn.
+        // Even a single slow player scan cannot starve the rest of the queue.
+        const bool allowPriority = prioritizeQueueNextFrame;
+        prioritizeQueueNextFrame = !prioritizeQueueNextFrame;
+        std::size_t inspections = 0, inspectionLimit;
+        { std::lock_guard lock(updateSlotQueueLock); inspectionLimit = std::min<std::size_t>(32, updateSlotQueue.size()); }
+        for (; inspections < inspectionLimit; ++inspections) {
+            if (scans >= 2 || (inspections && GeometryRetry::Clock::now() - scanStart >= std::chrono::milliseconds(2))) break;
+            RE::FormID id;
+            {
+                std::lock_guard lock(updateSlotQueueLock);
+                if (updateSlotQueue.empty()) break;
+                auto it = updateSlotQueue.end();
+                if (inspections == 0 && allowPriority) {
+                    if (auto player = RE::PlayerCharacter::GetSingleton()) it = updateSlotQueue.find(player->formID);
+                    if (it == updateSlotQueue.end() && priorityQueuedActor) it = updateSlotQueue.find(*priorityQueuedActor);
+                    priorityQueuedActor.reset();
                 }
-                if (!IsActorEnabled(actor)) continue;
-                if (GetIsActiveActor(actor->formID))
-                {
-                    if (!GetIsUpdating(actor->formID))
-                    {
-                        if (!ConditionManager::GetSingleton().GetCondition(actor).Enable)
-                            continue;
-                        auto root = actor->loadedData->data3D.get();
-                        auto race = actor->GetRace();
-                        const auto retryState = geometryRetry.Check(actor->formID, reinterpret_cast<std::uintptr_t>(root), race ? race->formID : 0);
-                        // Drop the request entirely after three spaced empty scans.
-                        // Model events or explicit refresh enqueue it again and clear the mark.
-                        if (retryState == GeometryRetry::State::Blacklisted)
-                            continue;
-                        if (retryState == GeometryRetry::State::CoolingDown ||
-                            scans >= 2 || (scans && GeometryRetry::Clock::now() - scanStart >= std::chrono::milliseconds(2))) {
-                            std::lock_guard lg(updateSlotQueueLock);
-                            updateSlotQueue[actor->formID] |= map.second;
-                            continue;
-                        }
-                        ++scans;
-                        lastScanActor = actor->formID;
-                        auto geometries = GetAllGeometries(actor);
-                        if (geometries.empty()) {
-                            const bool blacklisted = geometryRetry.Failed(actor->formID, reinterpret_cast<std::uintptr_t>(root), race ? race->formID : 0);
-                            logger::debug("{:x} : no supported geometry; {}", actor->formID, blacklisted ? "session model blacklist" : "retry after cooldown");
-                            if (!blacklisted) {
-                                std::lock_guard lg(updateSlotQueueLock);
-                                updateSlotQueue[actor->formID] |= map.second;
-                            }
-                        } else {
-                            geometryRetry.Forget(actor->formID);
-                            QUpdateNormalMapImpl(actor, std::move(geometries), map.second);
-                        }
-                    }
-                    else
-                    {
-                        std::lock_guard lg(updateSlotQueueLock);
-                        updateSlotQueue[actor->formID] |= map.second;
-                    }
+                if (it == updateSlotQueue.end()) {
+                    it = updateSlotQueue.upper_bound(lastScanActor);
+                    if (it == updateSlotQueue.end()) it = updateSlotQueue.begin();
+                    lastScanActor = it->first;
                 }
+                id = it->first;
+            }
+            auto actor = GetFormByID<RE::Actor*>(id);
+            if (IsInvalidActor(actor) || !IsActorEnabled(actor)) {
+                geometryRetry.Forget(id);
+                std::lock_guard lock(updateSlotQueueLock);
+                updateSlotQueue.erase(id);
+                continue;
+            }
+            // Recheck actual distance at dispatch, rather than waiting for the
+            // bounded distance sweep to reach a newly queued/moving actor.
+            if (!IsActorInRange(actor) || GetIsUpdating(id)) continue;
+            if (!ConditionManager::GetSingleton().GetCondition(actor).Enable) {
+                std::lock_guard lock(updateSlotQueueLock);
+                updateSlotQueue.erase(id);
+                continue;
+            }
+            auto root = actor->loadedData->data3D.get();
+            auto race = actor->GetRace();
+            const auto retryState = geometryRetry.Check(id, reinterpret_cast<std::uintptr_t>(root), race ? race->formID : 0);
+            if (retryState == GeometryRetry::State::CoolingDown) continue;
+            bSlotbit slots;
+            {
+                std::lock_guard lock(updateSlotQueueLock);
+                auto it = updateSlotQueue.find(id);
+                if (it == updateSlotQueue.end()) continue;
+                slots = it->second;
+                updateSlotQueue.erase(it);
+            }
+            if (retryState == GeometryRetry::State::Blacklisted) continue;
+            ++scans;
+            auto geometries = GetAllGeometries(actor);
+            if (geometries.empty()) {
+                if (!geometryRetry.Failed(id, reinterpret_cast<std::uintptr_t>(root), race ? race->formID : 0)) {
+                    std::lock_guard lock(updateSlotQueueLock);
+                    updateSlotQueue[id] |= slots;
+                }
+            } else {
+                geometryRetry.Forget(id);
+                QUpdateNormalMapImpl(actor, std::move(geometries), slots);
+            }
         }
 
         if (isAfterLoading)
@@ -431,8 +430,8 @@ namespace Mus {
             }
         }
 
-		if (Config::GetSingleton().GetQueueTime() && updateSlotQueue_.size() > 0)
-            PerformanceLog(std::string("updateSlotQueue"), true, false, updateSlotQueue_.size());
+		if (Config::GetSingleton().GetQueueTime() && inspections > 0)
+            PerformanceLog(std::string("updateSlotQueue"), true, false, inspections);
 	}
 
 	void TaskManager::RunDelayTask()
@@ -517,6 +516,8 @@ namespace Mus {
             return false;
         RE::FormID id = a_actor->formID;
         std::string actorName = a_actor->GetName();
+        // Remember disabled actors as well, for subsequent category enable.
+        SetIsActiveActor(id, IsActorInRange(a_actor));
         if (IsPlayer(id) && !Config::GetSingleton().GetPlayerEnable())
             return true;
         if (!IsPlayer(id) && !Config::GetSingleton().GetNPCEnable())
@@ -530,8 +531,8 @@ namespace Mus {
         {
             std::lock_guard lg(updateSlotQueueLock);
             updateSlotQueue[id] |= bipedSlot;
+            priorityQueuedActor = id;
         }
-        SetIsActiveActor(id, true);
         logger::debug("{}::{:x}::{} : queue added 0x{:x}", __func__, id, actorName, bipedSlot);
         return true;
     }
@@ -689,6 +690,15 @@ namespace Mus {
                     return;
                 }
 
+                // A bounded distance sweep may not have visited this actor yet.
+                // Never reattach an in-flight result after it left the VRAM range.
+                if (!IsActorEnabled(actor)) return;
+                if (Config::GetSingleton().GetUpdateDistanceVramSave() && !IsActorInRange(actor)) {
+                    // Keep a dirty request even if the bounded sweep never observed
+                    // this brief exit. Dispatch will wait until the actor is in range.
+                    QUpdateNormalMap(actor, BipedObjectSlot::kAll);
+                    return;
+                }
                 auto root = actor->loadedData->data3D.get();
                 if (root != sourceRoot.get())
                 {

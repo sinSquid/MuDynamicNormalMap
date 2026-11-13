@@ -108,7 +108,8 @@ namespace Mus {
         bool menuApplyScheduled = false;
         void ProcessMenuApply();
         void ExecuteMenuApply();
-        void RefreshRegisteredActors();
+        void RefreshRegisteredActors(bool discoverLoaded);
+        bool IsActorInRange(RE::Actor* actor) const;
         bool IsActorEnabled(RE::Actor* actor) const;
         void FinishMenuApply(bool success, const std::string& status);
         void WaitForComputations();
@@ -118,6 +119,7 @@ namespace Mus {
 		FrameTaskQueue delayTasks;
         GeometryRetry geometryRetry;
         RE::FormID lastScanActor = 0;
+        RE::FormID lastDistanceActor = 0;
         std::vector<std::function<void()>> deferredCallbacks;
 
 		bool isPressedHotKey1 = false;
@@ -146,9 +148,11 @@ namespace Mus {
 
 		typedef std::map<RE::FormID, bSlotbit> UpdateSlotQueue;
         UpdateSlotQueue updateSlotQueue;
+        std::optional<RE::FormID> priorityQueuedActor;
+        bool prioritizeQueueNextFrame = true;
         mutable std::mutex updateSlotQueueLock;
 
-		std::unordered_map<RE::FormID, bool> isActiveActors; // ActorID, isActive
+		std::map<RE::FormID, bool> isActiveActors; // ActorID, isActive
         mutable std::shared_mutex isActiveActorsLock;
         inline void SetIsActiveActor(RE::FormID a_actorID, bool a_isActive) {
             std::lock_guard lg(isActiveActorsLock);

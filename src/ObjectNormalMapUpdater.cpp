@@ -14,7 +14,6 @@ namespace Mus {
     void ObjectNormalMapUpdater::WaitForCleanup() noexcept {
         // No resource-map/context locks may be held while these jobs finish.
         FinishCleanup(resourceCleanup);
-        FinishCleanup(geometryCleanup);
     }
 
     void ObjectNormalMapUpdater::onEvent(const QuitGameEvent& e) {
@@ -59,29 +58,9 @@ namespace Mus {
 		});
 	}
 
-	void ObjectNormalMapUpdater::onEvent(const PlayerCellChangeEvent& e)
+	void ObjectNormalMapUpdater::onEvent(const PlayerCellChangeEvent&)
 	{
-		if (cleanupStopped || !e.IsChangedInOut)
-			return;
-        if (geometryCleanup.valid() && geometryCleanup.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
-            return;
-        FinishCleanup(geometryCleanup);
-        geometryCleanup = backGroundWorkerThreads->submitAsync([this]() {
-            std::lock_guard lg(geometryResourceDataMapLock);
-            for (auto it = geometryResourceDataMap.begin(); it != geometryResourceDataMap.end();)
-			{
-				RE::Actor* actor = GetFormByID<RE::Actor*>(it->first);
-				if (!actor || !actor->loadedData || !actor->loadedData->data3D)
-				{
-					logger::debug("{:x} : Removed garbage geometry resource", it->first);
-                    it = geometryResourceDataMap.erase(it);
-                    continue;
-				}
-                it++;
-			}
-            if (geometryResourceDataMap.size() > 0)
-                logger::debug("Current remain geometry resource {}", geometryResourceDataMap.size());
-		});
+        // Geometry buffers are owned only by their active update batch.
 	}
 
 	bool ObjectNormalMapUpdater::Init()
@@ -181,7 +160,21 @@ namespace Mus {
 				return a.first < b.first;
 			return aIt->objInfo.vertexCount() > bIt->objInfo.vertexCount();
 		});
-		std::unordered_set<std::uint64_t> pairedHashesAll;
+        // Snapshot complete groups before cache hits erase entries from the update set.
+        std::unordered_map<std::string, std::vector<std::uint64_t>> expectedComponents;
+        for (const auto& update : a_updateSet)
+        {
+            const auto geometry = std::find_if(a_data->geometries.begin(), a_data->geometries.end(),
+                [&](const auto& info) { return info.geometry == update.first; });
+            if (geometry != a_data->geometries.end())
+                expectedComponents[update.second.textureName].push_back(geometry->hash);
+        }
+        for (auto& [name, hashes] : expectedComponents)
+        {
+            std::sort(hashes.begin(), hashes.end());
+            hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
+        }
+        std::unordered_set<std::string> cachedTextureNames;
         for (auto it = a_updateSet.begin(); it != a_updateSet.end();)
         {
             const auto found = std::find_if(a_data->geometries.begin(), a_data->geometries.end(), [&](GeometryData::GeometriesInfo& geosInfo) {
@@ -193,7 +186,7 @@ namespace Mus {
                 it++;
                 continue;
             }
-            if (pairedHashesAll.find(found->hash) != pairedHashesAll.end())
+            if (cachedTextureNames.contains(it->second.textureName))
             {
                 it++;
                 continue;
@@ -207,27 +200,9 @@ namespace Mus {
                 it++;
                 continue;
             }
-            std::unordered_set<std::uint64_t> pairedHashes;
-            if (!std::ranges::all_of(a_updateSet, [&](auto& updateAlt) {
-                    if (it->first == updateAlt.first)
-                        return true;
-                    if (it->second.textureName != updateAlt.second.textureName)
-                        return true;
-                    const auto foundAlt = std::find_if(a_data->geometries.begin(), a_data->geometries.end(), [&](GeometryData::GeometriesInfo& geosInfo) {
-                        return geosInfo.geometry == updateAlt.first;
-                    });
-                    if (foundAlt == a_data->geometries.end())
-                    {
-                        logger::error("{}::{:x} : Geometry {} not found in data", __func__, a_actorID, it->second.geometryName);
-                        return true;
-                    }
-                    pairedHashes.insert(found->hash);
-                    pairedHashes.insert(foundAlt->hash);
-                    return NormalMapStore::GetSingleton().IsPairHashes(found->hash, foundAlt->hash);
-                }))
+            if (textureResource->componentHashes != expectedComponents.at(it->second.textureName))
             {
-                NormalMapStore::GetSingleton().InitHashPair(found->hash);
-                logger::info("{}::{:x}::{} : Found exist resource from {} ({:x}), but lack of components. so skip", __func__, a_actorID,
+                logger::info("{}::{:x}::{} : Found exist resource from {} ({:x}), but components differ. so skip", __func__, a_actorID,
                              it->second.geometryName, (diskCache ? "disk cache" : "GPU"), found->hash);
                 it++;
                 continue;
@@ -251,9 +226,8 @@ namespace Mus {
             newResourceData->textureName = it->second.textureName;
             resourceDatas.push_back(newResourceData);
 
+            cachedTextureNames.insert(it->second.textureName);
             it = a_updateSet.erase(it);
-
-            pairedHashesAll.insert(pairedHashes.begin(), pairedHashes.end());
         }
 
 		//shere resource and use GPU resource instead of disk cache if multiple cache is loaded on the same texture name
@@ -376,8 +350,7 @@ namespace Mus {
 	}
 	void ObjectNormalMapUpdater::ClearGeometryResourceData()
 	{
-        std::lock_guard lg(geometryResourceDataMapLock);
-        geometryResourceDataMap.clear();
+        // Kept for callers; geometry buffers now retire with the active batch.
 	}
 
 	ObjectNormalMapUpdater::GeometryResourceDataPtr ObjectNormalMapUpdater::CreateGeometryBuffers(RE::FormID a_actorID, GeometryDataPtr a_data)
@@ -402,18 +375,6 @@ namespace Mus {
 		if (!CreateStructuredBuffer(device, a_data->indices.data(), UINT(sizeof(std::uint32_t) * a_data->indices.size()), sizeof(std::uint32_t), newGeometryResourceData->indicesBuffer, newGeometryResourceData->indicesSRV))
 			return nullptr;
 
-		{
-                std::lock_guard lg(geometryResourceDataMapLock);
-                auto found = geometryResourceDataMap.find(a_actorID);
-                if (found == geometryResourceDataMap.end())
-			{
-                    geometryResourceDataMap.insert(std::make_pair(a_actorID, newGeometryResourceData));
-			}
-			else
-			{
-				found->second = newGeometryResourceData;
-			}
-		}
         return newGeometryResourceData;
 	}
 
@@ -1531,11 +1492,14 @@ namespace Mus {
                     failedCopyResources.insert(candidate.geometry);
         };
         const auto publishResource = [&](const NormalMapResult& result) {
-            // Pair metadata certifies the final cached image, so publish it only
-            // after mip generation, SRV creation and any cross-device copy succeed.
+            // This immutable certificate belongs to this exact completed image.
+            auto& hashes = result.texture->componentHashes;
+            hashes.clear();
             for (const auto& alias : results)
-                if (!alias.existResource && alias.geometry != result.geometry && alias.texture == result.texture)
-                    NormalMapStore::GetSingleton().AddHashPair(result.hash, alias.hash);
+                if (!alias.existResource && alias.texture == result.texture)
+                    hashes.push_back(alias.hash);
+            std::sort(hashes.begin(), hashes.end());
+            hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
             NormalMapStore::GetSingleton().AddResource(result.hash, result.texture);
         };
 
@@ -1701,11 +1665,14 @@ namespace Mus {
                     failedCopyResources.insert(candidate.geometry);
         };
         const auto publishResource = [&](const NormalMapResult& result) {
-            // Pair metadata certifies the final cached image, so publish it only
-            // after mip generation, SRV creation and any cross-device copy succeed.
+            // This immutable certificate belongs to this exact completed image.
+            auto& hashes = result.texture->componentHashes;
+            hashes.clear();
             for (const auto& alias : results)
-                if (!alias.existResource && alias.geometry != result.geometry && alias.texture == result.texture)
-                    NormalMapStore::GetSingleton().AddHashPair(result.hash, alias.hash);
+                if (!alias.existResource && alias.texture == result.texture)
+                    hashes.push_back(alias.hash);
+            std::sort(hashes.begin(), hashes.end());
+            hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
             NormalMapStore::GetSingleton().AddResource(result.hash, result.texture);
         };
 

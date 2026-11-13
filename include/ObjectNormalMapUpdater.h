@@ -53,7 +53,7 @@ namespace Mus {
             const auto busy = [](const std::future<void>& job) {
                 return job.valid() && job.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
             };
-            return busy(resourceCleanup) || busy(geometryCleanup);
+            return busy(resourceCleanup);
         }
 		bool CreateGeometryResourceData(RE::FormID a_actorID, GeometryDataPtr a_data);
 
@@ -84,7 +84,6 @@ namespace Mus {
         void WaitForCleanup() noexcept;
         static void FinishCleanup(std::future<void>& future) noexcept;
         std::future<void> resourceCleanup;
-        std::future<void> geometryCleanup;
         bool cleanupStopped = false; // Frame/cell/quit thread only.
 		inline ID3D11Device* GetDevice(std::int8_t i = -1) const { 
 			switch (i) {
@@ -446,9 +445,6 @@ namespace Mus {
 			Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> indicesSRV = nullptr;
 		};
 		typedef std::shared_ptr<GeometryResourceData> GeometryResourceDataPtr;
-        typedef std::unordered_map<RE::FormID, GeometryResourceDataPtr> GeometryResourceDataMap;
-        std::shared_mutex geometryResourceDataMapLock;
-        GeometryResourceDataMap geometryResourceDataMap;
 		GeometryResourceDataPtr CreateGeometryBuffers(RE::FormID a_actorID, GeometryDataPtr a_data);
 
 		std::shared_mutex resourceDataMapLock;

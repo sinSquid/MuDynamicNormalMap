@@ -30,6 +30,8 @@ namespace Mus {
     };
 
     struct TextureResource {
+        // Sorted, unique provenance of this exact artifact; immutable after publication.
+        std::vector<std::uint64_t> componentHashes;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> normalmapTexture2D = nullptr;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> normalmapShaderResourceView = nullptr;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> normalmapUnorderedAccessView = nullptr;

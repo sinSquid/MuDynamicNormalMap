@@ -22,10 +22,6 @@ namespace Mus{
 		bool GetResource(std::uint64_t a_hash, TextureResourcePtr& a_resource, bool& isDiskCache);
 		void ClearMemory();
 
-		void AddHashPair(std::uint64_t a_hash, std::uint64_t b_hash);
-		bool IsPairHashes(std::uint64_t a_hash, std::uint64_t b_hash);
-		void InitHashPair(std::uint64_t a_hash);
-
 		void CreateDiskCache(std::uint64_t a_hash, TextureResourcePtr a_resource);
 		TextureResourcePtr GetDiskCache(std::uint64_t a_hash);
 		void RemoveDiskCache(std::uint64_t a_hash);
@@ -61,7 +57,7 @@ namespace Mus{
 		std::recursive_mutex diskIOLock; // Serialize file transactions, reads and eviction.
         std::mutex diskCacheLock;
 		struct DiskCacheInfo {
-			std::clock_t lastAccessTime = 0;
+			std::vector<std::uint64_t> componentHashes;
 			std::uint32_t mipLevels = 0;
 			std::vector<std::uint32_t> rowPitch;
 			D3D11_TEXTURE2D_DESC texDesc{};
@@ -69,6 +65,10 @@ namespace Mus{
 		};
         typedef std::unordered_map<std::uint64_t, DiskCacheInfo> DiskCacheInfoMap;
         DiskCacheInfoMap diskCacheInfoMap;
+        // All on-disk entries, including cold files and incomplete transactions.
+        std::unordered_map<std::uint64_t, std::filesystem::file_time_type> diskAccessTimes;
+        void IndexDiskCache();
+        static bool ValidateComponents(std::uint64_t hash, const std::vector<std::uint64_t>& components);
 		void UpdateAccessTime(std::uint64_t a_hash);
         static bool ValidateDiskCacheInfo(const DiskCacheInfo& info);
         static std::uint64_t MipByteSize(const DiskCacheInfo& info, std::uint32_t mip);
@@ -103,8 +103,5 @@ namespace Mus{
 		}
 		void RemoveOldDiskCache();
 
-		std::mutex hashPairsLock;
-		typedef std::unordered_set<std::uint64_t> HashPair;
-		std::vector<HashPair> hashPairs;
 	};
 }

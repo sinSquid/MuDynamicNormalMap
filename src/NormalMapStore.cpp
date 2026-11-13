@@ -49,8 +49,8 @@ namespace Mus {
         for (UINT mip = 0; mip < desc.MipLevels; ++mip)
             bytes += static_cast<std::uint64_t>(std::max(desc.Width >> mip, 1u)) *
                 std::max(desc.Height >> mip, 1u) * 4;
-        // Conservatively charge compressed textures as RGBA too.
-        return bytes;
+        // Conservatively charge compressed textures as RGBA too, plus provenance.
+        return bytes + resource->componentHashes.size() * sizeof(std::uint64_t);
     }
 
 	void NormalMapStore::onEvent(const FrameEvent& e)
@@ -86,15 +86,7 @@ namespace Mus {
             std::lock_guard metadata(diskCacheLock);
             diskCacheInfoMap.clear();
         }
-        const std::filesystem::path folder = GetCacheFileFolder();
-        SetDiskCacheZeroSize();
-        std::error_code ec;
-        std::filesystem::directory_iterator it(folder, ec), end;
-        while (!ec && it != end) {
-            if (it->path().extension() == diskCacheExtension && it->is_regular_file(ec))
-                AddDiskCacheSize(GetFileSize(it->path()));
-            it.increment(ec);
-        }
+        IndexDiskCache();
     }
 	void NormalMapStore::ClearMemory()
     {
@@ -116,7 +108,7 @@ namespace Mus {
 
 	void NormalMapStore::AddResource(std::uint64_t a_hash, TextureResourcePtr a_resource)
     {
-        if (!a_resource)
+        if (!a_resource || !ValidateComponents(a_hash, a_resource->componentHashes))
             return;
         {
             std::lock_guard lg(lock);
@@ -128,6 +120,7 @@ namespace Mus {
                 // Aliased results may replace fields in their shared wrapper later.
                 // Pin only the final sampled COM resources, never that mutable wrapper.
                 auto snapshot = std::make_shared<TextureResource>();
+                snapshot->componentHashes = a_resource->componentHashes;
                 snapshot->normalmapTexture2D = a_resource->normalmapTexture2D;
                 snapshot->normalmapShaderResourceView = a_resource->normalmapShaderResourceView;
                 const auto bytes = EstimateDiskWriteBytes(snapshot);
@@ -170,58 +163,18 @@ namespace Mus {
 		return a_resource ? true : false;
 	}
 
-	void NormalMapStore::AddHashPair(std::uint64_t a_hash, std::uint64_t b_hash)
-	{
-        std::lock_guard lg(hashPairsLock);
-		auto found = std::find_if(hashPairs.begin(), hashPairs.end(), [&](HashPair& pair) {
-			return pair.find(a_hash) != pair.end() || pair.find(b_hash) != pair.end();
-		});
-		if (found != hashPairs.end())
-		{
-			found->insert(a_hash);
-			found->insert(b_hash);
-			logger::debug("Add hash pair {:x} - {:x}", a_hash, b_hash);
-		}
-		else
-		{
-			HashPair newPair;
-			newPair.insert(a_hash);
-			newPair.insert(b_hash);
-			hashPairs.push_back(newPair);
-			logger::debug("Create and add hash pair {:x} - {:x}", a_hash, b_hash);
-		}
-	}
-	bool NormalMapStore::IsPairHashes(std::uint64_t a_hash, std::uint64_t b_hash)
-    {
-        std::lock_guard lg(hashPairsLock);
-		bool isPair = std::find_if(hashPairs.cbegin(), hashPairs.cend(), [&](const HashPair& pair) {
-			return pair.find(a_hash) != pair.cend() && pair.find(b_hash) != pair.cend();
-		}) != hashPairs.cend();
-		logger::debug("Is pair hashes : {:x} - {:x} => {}", a_hash, b_hash, isPair ? "O" : "X");
-		return isPair;
-	}
-	void NormalMapStore::InitHashPair(std::uint64_t a_hash)
-    {
-        std::lock_guard lg(hashPairsLock);
-		auto found = std::find_if(hashPairs.begin(), hashPairs.end(), [&](HashPair& pair) {
-			return pair.find(a_hash) != pair.end();
-		});
-		if (found != hashPairs.end()) {
-			found->clear();
-			found->insert(a_hash);
-		}
-	}
-
 	void NormalMapStore::CreateDiskCache(std::uint64_t a_hash, TextureResourcePtr a_resource)
 	{
         std::lock_guard ioLock(diskIOLock);
-		if (!a_resource || !a_resource->normalmapTexture2D || !a_resource->normalmapShaderResourceView)
+		if (!a_resource || !ValidateComponents(a_hash, a_resource->componentHashes) ||
+            !a_resource->normalmapTexture2D || !a_resource->normalmapShaderResourceView)
 			return;
 
 		auto device = Shader::ShaderManager::GetSingleton().GetDevice();
 		auto context = Shader::ShaderManager::GetSingleton().GetContext();
 
 		DiskCacheInfo info;
+        info.componentHashes = a_resource->componentHashes;
 
 		Microsoft::WRL::ComPtr<ID3D11Texture2D> cacheTexture;
 		a_resource->normalmapTexture2D->GetDesc(&info.texDesc);
@@ -266,6 +219,7 @@ namespace Mus {
         }
         struct PendingFiles {
             NormalMapStore* owner;
+            std::uint64_t hash;
             std::vector<std::filesystem::path> paths;
             bool committed = false;
             ~PendingFiles() {
@@ -273,12 +227,15 @@ namespace Mus {
                     for (const auto& path : paths) {
                         std::error_code ec;
                         std::filesystem::remove(path, ec);
-                        if (ec)
+                        if (ec) {
                             owner->AddDiskCacheSize(GetFileSize(path));
+                            std::lock_guard metadata(owner->diskCacheLock);
+                            owner->diskAccessTimes[hash] = std::filesystem::file_time_type::min();
+                        }
                     }
                 }
             }
-        } pending{this};
+        } pending{this, a_hash};
         std::uint64_t writtenBytes = 0;
         try {
 		for (UINT mipLevel = 0; mipLevel < desc.MipLevels; mipLevel++) {
@@ -363,6 +320,9 @@ namespace Mus {
 		}
 		ofs.exceptions(std::ios::failbit | std::ios::badbit);
 		try {
+			const std::uint32_t componentCount = static_cast<std::uint32_t>(info.componentHashes.size());
+            ofs.write(reinterpret_cast<const char*>(&componentCount), sizeof(componentCount));
+            ofs.write(reinterpret_cast<const char*>(info.componentHashes.data()), componentCount * sizeof(std::uint64_t));
 			ofs.write(reinterpret_cast<const char*>(&info.mipLevels), sizeof(info.mipLevels));
 			std::size_t rowPitchSize = info.rowPitch.size();
 			ofs.write(reinterpret_cast<const char*>(&rowPitchSize), sizeof(rowPitchSize));
@@ -393,10 +353,10 @@ namespace Mus {
 			return;
 		}
         }
-        info.lastAccessTime = currentTime;
         {
             std::lock_guard lg(diskCacheLock);
             diskCacheInfoMap[a_hash] = info;
+            diskAccessTimes[a_hash] = std::filesystem::file_time_type::clock::now();
         }
         AddDiskCacheSize(writtenBytes);
         pending.committed = true;
@@ -481,10 +441,17 @@ namespace Mus {
 			}
 			ifs.exceptions(std::ios::failbit | std::ios::badbit);
 			try {
+                std::uint32_t componentCount = 0;
+                ifs.read(reinterpret_cast<char*>(&componentCount), sizeof(componentCount));
+                if (componentCount == 0 || componentCount > 1024) return nullptr;
+                info.componentHashes.resize(componentCount);
+                ifs.read(reinterpret_cast<char*>(info.componentHashes.data()), componentCount * sizeof(std::uint64_t));
+                if (!ValidateComponents(a_hash, info.componentHashes)) return nullptr;
 				ifs.read(reinterpret_cast<char*>(&info.mipLevels), sizeof(info.mipLevels));
 				std::size_t rowPitchSize = 0;
 				ifs.read(reinterpret_cast<char*>(&rowPitchSize), sizeof(rowPitchSize));
-                const auto metadataSize = sizeof(std::uint32_t) + sizeof(std::size_t) +
+                const auto metadataSize = sizeof(std::uint32_t) + componentCount * sizeof(std::uint64_t) +
+                    sizeof(std::uint32_t) + sizeof(std::size_t) +
                     static_cast<std::uint64_t>(rowPitchSize) * sizeof(std::uint32_t) + 15 * sizeof(std::uint32_t);
                 if (info.mipLevels == 0 || info.mipLevels > 15 || rowPitchSize != info.mipLevels ||
                     GetFileSize(infoPath) != metadataSize)
@@ -578,6 +545,7 @@ namespace Mus {
 		}
 
 		TextureResourcePtr result = std::make_shared<TextureResource>();
+        result->componentHashes = info.componentHashes;
 		auto hr = Shader::ShaderManager::GetSingleton().GetDevice()->CreateTexture2D(&info.texDesc, initDatas.data(), &result->normalmapTexture2D);
 		if (FAILED(hr)) {
 			logger::error("Failed to create dst texture {:x} : {}", a_hash, hr);
@@ -612,6 +580,7 @@ namespace Mus {
         if (allRemoved) {
             std::lock_guard lg(diskCacheLock);
             diskCacheInfoMap.erase(a_hash);
+            diskAccessTimes.erase(a_hash);
         }
     }
 
@@ -630,27 +599,24 @@ namespace Mus {
 
         const std::filesystem::path folder = GetCacheFileFolder();
         std::error_code ec;
-        std::uint64_t remainingBytes = 0;
         std::filesystem::directory_iterator it(folder, ec), end;
         while (!ec && it != end) {
             const auto file = it->path();
             if (file.extension() == diskCacheExtension && it->is_regular_file(ec)) {
                 std::filesystem::remove(file, ec);
                 if (ec) {
-                    remainingBytes += GetFileSize(file);
                     ec.clear();
                 }
             }
             it.increment(ec);
         }
-        SetDiskCacheZeroSize();
-        AddDiskCacheSize(remainingBytes);
+        IndexDiskCache();
 	}
 
 	std::string NormalMapStore::GetCacheFileFolder()
 	{
 		if (baseFolder.empty())
-			baseFolder = Config::GetSingleton().GetDiskCacheFolder() + "\\v2\\";
+			baseFolder = Config::GetSingleton().GetDiskCacheFolder() + "\\v3\\";
 		return baseFolder;
 	}
 	std::string NormalMapStore::GetCacheFileName(std::uint64_t a_hash, std::int32_t a_mipLevel)
@@ -690,60 +656,67 @@ namespace Mus {
 		}
 		return isRemoved;
 	}
-	void NormalMapStore::UpdateAccessTime(std::uint64_t a_hash)
-	{
-		if (!Config::GetSingleton().GetDiskCache())
-            return;
-        std::lock_guard lg(diskCacheLock);
-		auto found = diskCacheInfoMap.find(a_hash);
-		if (found != diskCacheInfoMap.end())
-			found->second.lastAccessTime = currentTime;
-	}
-	void NormalMapStore::RemoveOldDiskCache()
-	{
-        DiskCacheInfoMap diskCacheInfo_;
-        {
-            std::lock_guard lg(diskCacheLock);
-            diskCacheInfo_ = diskCacheInfoMap;
-        }
+    bool NormalMapStore::ValidateComponents(std::uint64_t hash, const std::vector<std::uint64_t>& components)
+    {
+        return !components.empty() && components.size() <= 1024 &&
+            std::is_sorted(components.begin(), components.end()) &&
+            std::adjacent_find(components.begin(), components.end()) == components.end() &&
+            std::binary_search(components.begin(), components.end(), hash);
+    }
 
-        if (diskCacheInfo_.empty()) {
-            // Persistent entries have not necessarily been looked up this session.
-            // Evict only names in our v2 schema, leaving unrelated files alone.
-            std::error_code ec;
-            std::filesystem::directory_iterator it(GetCacheFileFolder(), ec), end;
-            std::filesystem::file_time_type oldest = std::filesystem::file_time_type::max();
-            std::uint64_t oldestHash = 0;
-            bool found = false;
-            while (!ec && it != end) {
-                const auto name = it->path().filename().string();
-                if (it->path().extension() == diskCacheExtension && name.size() >= 16 + diskCacheExtension.size() &&
-                    std::all_of(name.begin(), name.begin() + 16, [](char c) {
-                        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-                    })) {
-                    const auto hash = std::stoull(name.substr(0, 16), nullptr, 16);
-                    bool ownName = false;
-                    for (std::int32_t mip = -1; mip < 15 && !ownName; ++mip)
-                        ownName = it->path().filename() == std::filesystem::path(GetCacheFileName(hash, mip)).filename();
-                    const auto time = it->last_write_time(ec);
-                    if (!ec && ownName && time < oldest) {
-                        oldest = time;
-                        oldestHash = hash;
-                        found = true;
-                    }
-                    ec.clear();
+    void NormalMapStore::IndexDiskCache()
+    {
+        // One directory scan at initialization/explicit clearing, never per write.
+        std::lock_guard metadata(diskCacheLock);
+        diskAccessTimes.clear();
+        SetDiskCacheZeroSize();
+        std::error_code ec;
+        std::filesystem::directory_iterator it(GetCacheFileFolder(), ec), end;
+        while (!ec && it != end) {
+            const auto name = it->path().filename().string();
+            if (it->is_regular_file(ec) && it->path().extension() == diskCacheExtension &&
+                name.size() >= 16 + diskCacheExtension.size() &&
+                std::all_of(name.begin(), name.begin() + 16, [](char c) {
+                    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                })) {
+                const auto hash = std::stoull(name.substr(0, 16), nullptr, 16);
+                bool ownName = false;
+                for (std::int32_t mip = -1; mip < 15 && !ownName; ++mip)
+                    ownName = it->path().filename() == std::filesystem::path(GetCacheFileName(hash, mip)).filename();
+                if (ownName) {
+                    AddDiskCacheSize(GetFileSize(it->path()));
+                    auto time = it->last_write_time(ec);
+                    if (ec) { time = std::filesystem::file_time_type::min(); ec.clear(); }
+                    auto [entry, inserted] = diskAccessTimes.emplace(hash, time);
+                    if (!inserted) entry->second = std::max(entry->second, time);
                 }
-                it.increment(ec);
             }
-            if (found)
-                RemoveDiskCache(oldestHash);
-            return;
+            ec.clear();
+            it.increment(ec);
         }
+    }
 
-		auto minIt = std::min_element(diskCacheInfo_.begin(), diskCacheInfo_.end(), 
-						 [] (std::pair<std::uint64_t, DiskCacheInfo> a, std::pair<std::uint64_t, DiskCacheInfo> b) {
-			return a.second.lastAccessTime < b.second.lastAccessTime;
-		});
-		RemoveDiskCache(minIt->first);
-	}
+    void NormalMapStore::UpdateAccessTime(std::uint64_t a_hash)
+    {
+        if (!Config::GetSingleton().GetDiskCache()) return;
+        std::lock_guard metadata(diskCacheLock);
+        auto found = diskAccessTimes.find(a_hash);
+        if (found == diskAccessTimes.end()) return;
+        const auto now = std::filesystem::file_time_type::clock::now();
+        found->second = now;
+        // RAM hits must never wait for a disk transaction. Across sessions, use file age.
+    }
+
+    void NormalMapStore::RemoveOldDiskCache()
+    {
+        std::uint64_t oldestHash;
+        {
+            std::lock_guard metadata(diskCacheLock);
+            if (diskAccessTimes.empty()) return;
+            const auto oldest = std::min_element(diskAccessTimes.begin(), diskAccessTimes.end(),
+                [](const auto& a, const auto& b) { return a.second < b.second; });
+            oldestHash = oldest->first;
+        }
+        RemoveDiskCache(oldestHash);
+    }
 }
