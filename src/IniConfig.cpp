@@ -19,6 +19,12 @@ namespace Mus::IniConfig {
             explicit Handle(HANDLE h) : value(h) {}
             Handle(const Handle&) = delete;
             Handle& operator=(const Handle&) = delete;
+            bool Close() {
+                if (value == INVALID_HANDLE_VALUE) return true;
+                const auto file = value;
+                value = INVALID_HANDLE_VALUE;
+                return CloseHandle(file) != FALSE;
+            }
         };
         struct TemporaryFile {
             std::filesystem::path path;
@@ -33,15 +39,33 @@ namespace Mus::IniConfig {
             if (first == text.npos) return {};
             return text.substr(first, text.find_last_not_of(" \t\r") - first + 1);
         }
+        std::string Failure(std::string_view stage, const std::filesystem::path& path, DWORD code) {
+            wchar_t message[1024]{};
+            const auto length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+                code, 0, message, static_cast<DWORD>(std::size(message)), nullptr);
+            const auto count = WideCharToMultiByte(CP_UTF8, 0, message, length, nullptr, 0, nullptr, nullptr);
+            std::string detail(count, '\0');
+            if (count) WideCharToMultiByte(CP_UTF8, 0, message, length, detail.data(), count, nullptr, nullptr);
+            const auto last = detail.find_last_not_of(" \t\r\n");
+            detail.resize(last == detail.npos ? 0 : last + 1);
+            const auto utf8 = path.u8string();
+            return std::string(stage) + " [path=" + std::string(utf8.begin(), utf8.end()) +
+                "] (Win32 " + std::to_string(code) + "): " + detail;
+        }
         bool ReadBytes(HANDLE file, std::string& bytes) {
             LARGE_INTEGER size{};
-            if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > 16 * 1024 * 1024)
+            if (!GetFileSizeEx(file, &size)) return false;
+            if (size.QuadPart < 0 || size.QuadPart > 16 * 1024 * 1024) {
+                SetLastError(ERROR_FILE_TOO_LARGE);
                 return false;
+            }
             bytes.resize(static_cast<std::size_t>(size.QuadPart));
             LARGE_INTEGER start{};
             if (!SetFilePointerEx(file, start, nullptr, FILE_BEGIN)) return false;
             DWORD read = 0;
-            return ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) && read == bytes.size();
+            if (!ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr)) return false;
+            if (read != bytes.size()) { SetLastError(ERROR_HANDLE_EOF); return false; }
+            return true;
         }
         std::string Rewrite(std::string input, const RuntimeTuning& tuning) {
             const bool bom = input.starts_with("\xef\xbb\xbf");
@@ -135,23 +159,25 @@ namespace Mus::IniConfig {
             const auto absolute = std::filesystem::absolute(path);
             std::error_code ec;
             if (path.empty() || !std::filesystem::is_directory(absolute.parent_path(), ec) || ec) {
-                error = "INI parent directory does not exist";
+                error = Failure("Validate INI parent directory", absolute.parent_path(), ec ? static_cast<DWORD>(ec.value()) : ERROR_PATH_NOT_FOUND);
                 return false;
             }
             Handle source(CreateFileW(absolute.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
             const auto sourceError = source.value == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
-            if (source.value == INVALID_HANDLE_VALUE && sourceError != ERROR_FILE_NOT_FOUND) {
-                error = "Cannot open INI (Win32 " + std::to_string(sourceError) + ")";
+            if (source.value == INVALID_HANDLE_VALUE && sourceError != ERROR_FILE_NOT_FOUND && sourceError != ERROR_PATH_NOT_FOUND) {
+                error = Failure("Open INI", absolute, sourceError);
                 return false;
             }
             std::string original;
             if (source.value != INVALID_HANDLE_VALUE && !ReadBytes(source.value, original)) {
-                error = "Cannot read INI or INI exceeds 16 MiB";
+                error = Failure("Read INI (maximum 16 MiB)", absolute, GetLastError());
                 return false;
             }
+            const bool existed = source.value != INVALID_HANDLE_VALUE;
+            if (!source.Close()) { error = Failure("Close source INI", absolute, GetLastError()); return false; }
             if (original.starts_with("\xff\xfe") || original.starts_with("\xfe\xff") || original.find('\0') != original.npos) {
-                error = "UTF-16/UTF-32 INI is unsupported; file was not changed";
+                error = Failure("Reject unsupported UTF-16/UTF-32 INI", absolute, ERROR_NO_UNICODE_TRANSLATION);
                 return false;
             }
             const auto rewritten = Rewrite(original, normalized);
@@ -159,31 +185,59 @@ namespace Mus::IniConfig {
             {
                 Handle output(CreateFileW(temporary.path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                     FILE_ATTRIBUTE_NORMAL, nullptr));
-                if (output.value == INVALID_HANDLE_VALUE) { error = "Cannot create temporary INI"; return false; }
+                if (output.value == INVALID_HANDLE_VALUE) { error = Failure("Create temporary INI", temporary.path, GetLastError()); return false; }
                 temporary.owned = true;
                 DWORD written = 0;
-                if (!WriteFile(output.value, rewritten.data(), static_cast<DWORD>(rewritten.size()), &written, nullptr) ||
-                    written != rewritten.size() || !FlushFileBuffers(output.value)) {
-                    error = "Cannot flush temporary INI";
-                    return false;
+                if (!WriteFile(output.value, rewritten.data(), static_cast<DWORD>(rewritten.size()), &written, nullptr)) {
+                    error = Failure("Write temporary INI", temporary.path, GetLastError()); return false;
+                }
+                if (written != rewritten.size()) {
+                    error = Failure("Short write temporary INI", temporary.path, ERROR_WRITE_FAULT); return false;
+                }
+                if (!FlushFileBuffers(output.value)) {
+                    error = Failure("Flush temporary INI", temporary.path, GetLastError()); return false;
+                }
+                if (!output.Close()) {
+                    error = Failure("Close temporary INI", temporary.path, GetLastError()); return false;
                 }
             }
-            if (source.value != INVALID_HANDLE_VALUE) {
-                Handle check(CreateFileW(absolute.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-                std::string latest;
-                if (check.value == INVALID_HANDLE_VALUE || !ReadBytes(check.value, latest) || latest != original) {
-                    error = "INI changed during save; retry after reviewing external edits";
-                    return false;
+            if (existed) {
+                {
+                    Handle check(CreateFileW(absolute.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+                    if (check.value == INVALID_HANDLE_VALUE) {
+                        error = Failure("Reopen INI for conflict check", absolute, GetLastError()); return false;
+                    }
+                    std::string latest;
+                    if (!ReadBytes(check.value, latest)) {
+                        error = Failure("Read INI for conflict check", absolute, GetLastError()); return false;
+                    }
+                    if (latest != original) {
+                        error = Failure("INI changed during save; review external edits and retry", absolute, ERROR_FILE_INVALID); return false;
+                    }
+                    BY_HANDLE_FILE_INFORMATION info{};
+                    if (!GetFileInformationByHandle(check.value, &info)) {
+                        error = Failure("Inspect INI attributes", absolute, GetLastError());
+                        return false;
+                    }
+                    if (info.dwFileAttributes & FILE_ATTRIBUTE_READONLY) {
+                        error = Failure("INI is read-only; clear the read-only attribute and retry", absolute, ERROR_ACCESS_DENIED);
+                        return false;
+                    }
+                    if (!check.Close()) {
+                        error = Failure("Close conflict-check INI", absolute, GetLastError()); return false;
+                    }
                 }
-                const auto backup = absolute.wstring() + L".menu.bak";
-                if (!ReplaceFileW(absolute.c_str(), temporary.path.c_str(), backup.c_str(), 0, nullptr, nullptr)) {
-                    error = "Cannot replace INI (Win32 " + std::to_string(GetLastError()) + ")";
-                    return false;
+                // Keep the previous user file independently of the rename. No source
+                // handle may remain open when MO2's virtual filesystem commits it.
+                const std::filesystem::path backup = absolute.wstring() + L".menu.bak";
+                if (!CopyFileW(absolute.c_str(), backup.c_str(), FALSE)) {
+                    error = Failure("Back up INI", backup, GetLastError()); return false;
                 }
-            } else if (!MoveFileExW(temporary.path.c_str(), absolute.c_str(), MOVEFILE_WRITE_THROUGH)) {
-                error = "Cannot create INI; another editor may have created it";
-                return false;
+            }
+            const DWORD flags = MOVEFILE_WRITE_THROUGH | (existed ? MOVEFILE_REPLACE_EXISTING : 0);
+            if (!MoveFileExW(temporary.path.c_str(), absolute.c_str(), flags)) {
+                error = Failure("Commit temporary INI", absolute, GetLastError()); return false;
             }
             temporary.path.clear();
             return true;

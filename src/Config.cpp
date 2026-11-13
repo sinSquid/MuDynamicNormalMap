@@ -1,4 +1,5 @@
 #include "Config.h"
+#include "RuntimeSettingsFiles.h"
 
 namespace Mus {
     bool Config::LoadLogging()
@@ -22,7 +23,9 @@ namespace Mus {
 
         RuntimeTuning values;
         std::string error;
-        if (!ParseRuntimeTuningIni(file, *GetRuntimeTuning(), values, error, true)) return false;
+        const auto folder = std::filesystem::path(GetRuntimeSKSEDirectory());
+        if (!LoadRuntimeSettingsFiles(folder / "MuDynamicNormalMap.ini", folder / "MuDynamicNormalMap_User.ini",
+            *GetRuntimeTuning(), values, error, true)) return false;
         return ApplyRuntimeTuning(values, error);
     }
 
@@ -45,7 +48,15 @@ namespace Mus {
             }
         }
 
-        return LoadConfig(file);
+        RuntimeTuning values;
+        std::string error;
+        const auto folder = std::filesystem::path(GetRuntimeSKSEDirectory());
+        if (!LoadRuntimeSettingsFiles(folder / "MuDynamicNormalMap.ini", folder / "MuDynamicNormalMap_User.ini",
+            *GetRuntimeTuning(), values, error) || !ApplyRuntimeTuning(values, error)) {
+            logger::error("Unable to load default/user configuration: {}", error);
+            return false;
+        }
+        return true;
     }
 
     bool Config::LoadConfig(std::ifstream& configfile)

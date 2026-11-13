@@ -389,12 +389,19 @@ namespace Mus::SettingsMenu {
                 else QueueApply(normalized);
             } else if (!pending && valid && save) {
                 try {
-                    const auto path = std::filesystem::path(GetRuntimeSKSEDirectory()) / "MuDynamicNormalMap.ini";
+                    const auto path = std::filesystem::path(GetRuntimeSKSEDirectory()) / "MuDynamicNormalMap_User.ini";
                     if (IniConfig::SaveRuntimeTuning(path, normalized, error)) {
                         draft = normalized;
-                        Status("已保存全部菜单设置到 INI；当前游戏未改变。如需立即生效，请点击应用。");
-                    } else Status("保存失败：" + error);
-                } catch (const std::exception& e) { Status(std::string("保存失败：") + e.what()); }
+                        logger::info("Saved menu overrides to {}", path.string());
+                        Status("已保存到 MuDynamicNormalMap_User.ini；当前游戏未改变。如需立即生效，请点击应用。");
+                    } else {
+                        logger::error("Menu INI save failed at {}: {}", path.string(), error);
+                        Status("保存失败：" + error);
+                    }
+                } catch (const std::exception& e) {
+                    logger::error("Menu INI save exception: {}", e.what());
+                    Status(std::string("保存失败：") + e.what());
+                }
             } else if (!pending && undo) {
                 draft = *live;
                 Status("已恢复为当前游戏正在使用的数值。");
