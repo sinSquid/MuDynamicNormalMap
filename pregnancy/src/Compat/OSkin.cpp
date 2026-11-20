@@ -1,15 +1,16 @@
 #include "pch.h"
 #include "Compat/BodyProviders.h"
 #include "Compat/OSkin.h"
+#include "Compat/MaterialAssignment.h"
 #include "Compat/ProviderMorphs.h"
 #include "Compat/SkinPaths.h"
 
 namespace PNS::OSkin {
     namespace {
         bool enabled = false;
-        // OSkin swaps the whole material even for a diffuse-only assignment. Mu changes
-        // the normal texture inside the material, so its own writes do not change this key.
-        using Material = std::tuple<std::uintptr_t, std::uintptr_t, std::string>;
+        // OSkin swaps the whole material even for a diffuse-only assignment.
+        // Our own material clones explicitly migrate this observed identity.
+        using Material = MaterialAssignment;
         std::unordered_map<RE::FormID, std::vector<Material>> assignments;
     }
     void Initialize() {
@@ -19,6 +20,23 @@ namespace PNS::OSkin {
     bool Active() { return enabled; }
     void Forget(RE::FormID id) { assignments.erase(id); }
     void Clear() { assignments.clear(); }
+
+    void OnMaterialCloned(RE::FormID actorID, RE::BSGeometry* geometry, RE::BSLightingShaderMaterialBase* source,
+        RE::BSLightingShaderMaterialBase* replacement) {
+        if (!enabled || !geometry || !source || !replacement ||
+            !source->textureSet || !replacement->textureSet) return;
+        const auto found = assignments.find(actorID);
+        if (found == assignments.end()) return;
+        const auto normalPath = [](RE::BSLightingShaderMaterialBase* material) {
+            const auto* path = material->textureSet->GetTexturePath(RE::BSTextureSet::Texture::kNormal);
+            return path ? SkinPaths::Relative(path) : std::string{};
+        };
+        const Material before{reinterpret_cast<std::uintptr_t>(geometry),
+            reinterpret_cast<std::uintptr_t>(source), normalPath(source)};
+        const Material after{reinterpret_cast<std::uintptr_t>(geometry),
+            reinterpret_cast<std::uintptr_t>(replacement), normalPath(replacement)};
+        AcknowledgeClone(found->second, before, after);
+    }
 
     void Observe(RE::Actor* actor) {
         if (!enabled || !actor || !actor->Get3D()) return;

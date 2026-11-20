@@ -1,5 +1,7 @@
 #pragma once
 #include "Rendering/DynamicNormalMap.h"
+#include <mutex>
+#include <unordered_map>
 
 namespace PNS {
 
@@ -11,6 +13,41 @@ namespace PNS {
         std::string nodeName;          // cached NiOverride node name
         bool isFemale = false;
         float currentMorph = 0.0f;
+        bool restorePending = false;
+        bool restoreQueued = false;
+        std::uint64_t restoreRequest = 0;
+
+        void SuppressLayer(bool installedLayer) {
+            restorePending = restorePending || installedLayer || currentMorph != 0.0f ||
+                currentPartition > 0 || !currentTexture.empty();
+            // Logical invalidation precedes the independent physical restore.
+            currentMorph = 0.0f;
+            currentPartition = 0;
+            currentTexture.clear();
+        }
+
+        template <class Enqueue>
+        void ScheduleRestore(std::uint64_t request, Enqueue&& enqueue) {
+            if (!restorePending || restoreQueued) return;
+            restoreRequest = request;
+            restoreQueued = true;
+            try {
+                if (!enqueue()) restoreQueued = false;
+            } catch (...) {
+                restoreQueued = false;
+                throw;
+            }
+        }
+        bool TakeRestore(std::uint64_t request) {
+            if (!restorePending || !restoreQueued || restoreRequest != request) return false;
+            restoreQueued = false;
+            return true;
+        }
+        bool FinishRestore(std::uint64_t request, bool restored) {
+            if (restoreRequest != request) return false;
+            restorePending = !restored;
+            return true;
+        }
     };
 
     class ActorManager {
@@ -45,9 +82,13 @@ namespace PNS {
 
     private:
         ActorManager() = default;
+        // Called with mutex_ held; the queue never invokes the callback inline.
+        void QueueRestore(RE::FormID id, ActorState& state);
+        void RunRestore(RE::FormID id, std::uint64_t session, std::uint64_t request);
 
         std::unordered_map<RE::FormID, ActorState> trackedActors_;
         std::mutex mutex_;
+        std::uint64_t nextRestoreRequest_ = 0;
     };
 
 }  // namespace PNS

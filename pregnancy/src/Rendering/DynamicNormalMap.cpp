@@ -88,12 +88,14 @@ namespace PNS {
     }
 
 
-    RE::BSLightingShaderMaterialBase* PrivateNormalMaterial(RE::BSGeometry* geometry) {
+    RE::BSLightingShaderMaterialBase* PrivateNormalMaterial(RE::FormID actorID, RE::BSGeometry* geometry) {
         if (!geometry || !ModuleEnabled() || !SessionActive()) return nullptr;
         RendererLock lock;
         auto& runtime = geometry->GetGeometryRuntimeData();
         auto* source = netimmerse_cast<RE::BSLightingShaderProperty*>(runtime.shaderProperty.get());
         if (!source || !source->material) return nullptr;
+        // Keep the old material alive until OSkin has checked its source identity.
+        RE::NiPointer<RE::BSLightingShaderProperty> original{source};
         RE::NiPointer<RE::NiObject> copy{source->Clone()};
         auto* property = netimmerse_cast<RE::BSLightingShaderProperty*>(copy.get());
         if (!property || property == source) return nullptr;
@@ -104,7 +106,12 @@ namespace PNS {
         if (!lighting) return nullptr;
         property->SetMaterial(material.get(), true);
         runtime.shaderProperty.reset(property);
-        return skyrim_cast<RE::BSLightingShaderMaterialBase*>(property->material);
+        auto* installed = skyrim_cast<RE::BSLightingShaderMaterialBase*>(property->material);
+        OSkin::OnMaterialCloned(actorID, geometry,
+            skyrim_cast<RE::BSLightingShaderMaterialBase*>(original->material), installed);
+        OnInstalledMaterialCloned(actorID, geometry,
+            skyrim_cast<RE::BSLightingShaderMaterialBase*>(original->material), installed);
+        return installed;
     }
 
     bool ReadAssignedNormal(const std::string& path, ComPtr<ID3D11Texture2D>& texture,

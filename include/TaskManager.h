@@ -80,7 +80,7 @@ namespace Mus {
 		typedef std::unordered_map<std::size_t, RE::BSGeometry*> GeometryList;
         GeometryList GetAllGeometries(RE::Actor* a_actor);
 
-		bool QUpdateNormalMap(RE::Actor* a_actor, bSlotbit bipedSlot = BipedObjectSlot::kAll);
+		bool QUpdateNormalMap(RE::Actor* a_actor, bSlotbit bipedSlot = BipedObjectSlot::kAll, bool requireEnqueue = false);
 
 		bool QUpdateNormalMapImpl(RE::Actor* a_actor, GeometryList a_srcGeometies, bSlotbit bipedSlot);
 		void QUpdateNormalMapImpl(RE::FormID a_actorID, std::string a_actorName, GeometryDataPtr a_geoData, UpdateSet& a_updateSet, RE::NiPointer<RE::NiAVObject> sourceRoot);

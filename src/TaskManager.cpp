@@ -3,9 +3,22 @@
 #include "Compat/OSkin.h"
 #include "Compat/SkinPaths.h"
 #include "Lifecycle.h"
+#include "RestoreQueue.h"
 #include "SettingsCatalog.h"
 
 namespace Mus {
+    namespace {
+        // Material writes target the game's renderer even when compute uses a second GPU.
+        class MaterialLock {
+        public:
+            MaterialLock() : renderer(RE::BSGraphics::Renderer::GetSingleton()) { renderer->Lock(); }
+            ~MaterialLock() { renderer->Unlock(); }
+            MaterialLock(const MaterialLock&) = delete;
+            MaterialLock& operator=(const MaterialLock&) = delete;
+        private:
+            RE::BSGraphics::Renderer* renderer;
+        };
+    }
     bool TaskManager::IsActorEnabled(RE::Actor* actor) const {
         if (!actor) return false;
         const auto tuning = Config::GetSingleton().GetRuntimeTuning();
@@ -352,7 +365,7 @@ namespace Mus {
             // Check independently of the old active bit: enabling VRAM saving must
             // also release maps of actors that were already outside the range.
             if (!inRange && Config::GetSingleton().GetUpdateDistanceVramSave() &&
-                !GetIsUpdating(id) && IsExistLastNormalMap(id)) RemoveNormalMap(actor);
+                !GetIsUpdating(id) && (IsExistLastNormalMap(id) || PNS::HasInstalledLayer(id))) RemoveNormalMap(actor);
             if (inRange && !wasActive) QUpdateNormalMap(actor);
         }
 
@@ -512,7 +525,7 @@ namespace Mus {
         });
 		return geometries;
 	}
-    bool TaskManager::QUpdateNormalMap(RE::Actor* a_actor, bSlotbit bipedSlot)
+    bool TaskManager::QUpdateNormalMap(RE::Actor* a_actor, bSlotbit bipedSlot, bool requireEnqueue)
     {
 		if (stoppingComputations.load())
             return false;
@@ -523,15 +536,17 @@ namespace Mus {
         // Remember disabled actors as well, for subsequent category enable.
         SetIsActiveActor(id, IsActorInRange(a_actor));
         if (IsPlayer(id) && !Config::GetSingleton().GetPlayerEnable())
-            return true;
+            return !requireEnqueue;
         if (!IsPlayer(id) && !Config::GetSingleton().GetNPCEnable())
-            return true;
+            return !requireEnqueue;
         if (GetSex(a_actor) == RE::SEX::kMale && !Config::GetSingleton().GetMaleEnable())
-            return true;
+            return !requireEnqueue;
         if (GetSex(a_actor) == RE::SEX::kFemale && !Config::GetSingleton().GetFemaleEnable())
-            return true;
+            return !requireEnqueue;
         if (bipedSlot & BipedObjectSlot::kHead && !Config::GetSingleton().GetHeadEnable())
             bipedSlot &= ~BipedObjectSlot::kHead;
+        if (!bipedSlot)
+            return !requireEnqueue;
         {
             std::lock_guard lg(updateSlotQueueLock);
             updateSlotQueue[id] |= bipedSlot;
@@ -634,13 +649,17 @@ namespace Mus {
 
 				if (!Config::GetSingleton().GetRevertNormalMap())
                 {
-                    if (IsExistLastNormalMap(id, newSet.slot, newSet.textureName)) {
+                    MaterialLock materialLock;
+                    if (IsExistLastNormalMap(id, newSet.slot, newSet.textureName) &&
+                        !PNS::OwnsInstalledGeometry(id, geo)) {
+                        // Keep a live owned layer until a replacement actually succeeds.
                         // This fast reattach also writes a material, before the async result.
                         if (PNS::ModuleEnabled()) {
-                            material = PNS::PrivateNormalMaterial(geo);
+                            material = PNS::PrivateNormalMaterial(id, geo);
                             if (!material) continue;
                         }
-                        Shader::TextureLoadManager::CreateSourceTexture(newSet.textureName, material->normalTexture);
+                        if (Shader::TextureLoadManager::CreateSourceTexture(newSet.textureName, material->normalTexture) >= 0)
+                            PNS::RetireInstalledGeometry(id, geo);
                     }
                 }
                 newUpdateSet.push_back(std::make_pair(geo, std::move(newSet)));
@@ -698,9 +717,7 @@ namespace Mus {
                 return;
             }
 
-            auto* tasks = SKSE::GetTaskInterface();
-            if (!tasks) return;
-            tasks->AddTask([this, a_actorID, a_actorName, sourceRoot, session, busyTicket = activeTicket, textures = std::move(textures)]() {
+            RegisterDelayTask([this, a_actorID, a_actorName, sourceRoot, session, busyTicket = activeTicket, textures = std::move(textures)]() {
                 if (stoppingComputations.load() || session != PNS::SessionGeneration() || !PNS::SessionActive()) return;
                 auto actor = GetFormByID<RE::Actor*>(a_actorID);
                 if (IsInvalidActor(actor))
@@ -739,10 +756,14 @@ namespace Mus {
                     QUpdateNormalMap(actor, BipedObjectSlot::kAll);
                     return;
                 }
+                PNS::PruneInstalledLayers(a_actorID, liveShapes);
                 // Serialize material installation and GPU composition with the renderer.
-                Shader::ShaderLocker rendererLock(Shader::ShaderManager::GetSingleton().GetContext());
-                Shader::ShaderLockGuard rendererGuard(rendererLock);
-                std::unordered_map<std::string, RE::NiSourceTexturePtr> createdTextures;
+                MaterialLock materialLock;
+                struct PreparedNormal {
+                    RE::NiSourceTexturePtr texture;
+                    RE::NiSourceTexturePtr restoreBase; // nonempty only for a composed pregnancy layer
+                };
+                std::unordered_map<std::string, PreparedNormal> createdTextures;
                 RE::BSVisit::TraverseScenegraphGeometries(root, [&](RE::BSGeometry* geo) -> RE::BSVisit::BSVisitControl {
                     using Feature = RE::BSShaderMaterial::Feature;
                     if (!geo || geo->name.empty())
@@ -838,21 +859,27 @@ namespace Mus {
                         return RE::BSVisit::BSVisitControl::kContinue;
 
                     RE::NiSourceTexturePtr normalmap = nullptr;
+                    RE::NiSourceTexturePtr restoreBase;
                     if (auto texIt = createdTextures.find(found->textureName); texIt != createdTextures.end())
                     {
-                        normalmap = texIt->second;
+                        normalmap = texIt->second.texture;
+                        restoreBase = texIt->second.restoreBase;
                     }
                     else
                     {
                         // Never mutate the shared Mu cache wrapper with an actor-specific layer.
                         auto texture = found->texture->normalmapTexture2D;
                         auto view = found->texture->normalmapShaderResourceView;
+                        auto baseTexture = texture;
+                        auto baseView = view;
                         if (PNS::ModuleEnabled()) {
                             const bool dinoBody = found->slot == RE::BIPED_OBJECT::kBody && PNS::HasDinoBridge();
                             const bool oskinSource = PNS::OSkin::Active() && (found->slot == RE::BIPED_OBJECT::kBody ||
                                 PNS::SkinPaths::IsPackPath(found->texturePath));
                             if ((dinoBody || oskinSource) && !PNS::ReadAssignedNormal(found->texturePath, texture, view))
                                 return RE::BSVisit::BSVisitControl::kContinue;
+                            baseTexture = texture;
+                            baseView = view;
                             if (found->slot == RE::BIPED_OBJECT::kBody) {
                                 std::vector<RE::BSGeometry*> shapes;
                                 for (const auto& result : textures)
@@ -861,12 +888,22 @@ namespace Mus {
                                 PNS::ComposeMuBody(actor, shapes, texture, view, found->texturePath, dinoBody);
                             }
                         }
-                        if (Shader::TextureLoadManager::GetSingleton().CreateNiTexture(found->textureName, texture, view, normalmap) < 0 || !normalmap || !normalmap->rendererTexture || !normalmap->rendererTexture->texture || !normalmap->rendererTexture->resourceView)
+                        // The named Mu wrapper is mutable and shared by aliases/fast
+                        // reattach. Keep it base-only; pregnancy outputs are private.
+                        if (Shader::TextureLoadManager::GetSingleton().CreateNiTexture(found->textureName, baseTexture, baseView, normalmap) < 0 || !normalmap || !normalmap->rendererTexture || !normalmap->rendererTexture->texture || !normalmap->rendererTexture->resourceView)
                         {
                             logger::error("{:x}::{}::{} : Failed to create NiTexture", a_actorID, a_actorName, geo->name.c_str());
                             return RE::BSVisit::BSVisitControl::kContinue;
                         }
-                        createdTextures.insert(std::make_pair(found->textureName, normalmap));
+                        if (view.Get() != baseView.Get()) {
+                            auto privateOutput = PNS::CreatePrivateNormalTexture(found->textureName, texture, view);
+                            auto privateBase = PNS::CreatePrivateNormalTexture(found->textureName, baseTexture, baseView);
+                            if (!privateOutput || !privateBase)
+                                return RE::BSVisit::BSVisitControl::kContinue;
+                            normalmap = std::move(privateOutput);
+                            restoreBase = std::move(privateBase);
+                        }
+                        createdTextures.emplace(found->textureName, PreparedNormal{normalmap, restoreBase});
                         if (Config::GetSingleton().GetLogLevel() <= spdlog::level::level_enum::debug)
                         {
                             TextureLog(found->texture->normalmapTexture2D.Get());
@@ -876,12 +913,20 @@ namespace Mus {
 
                     if (PNS::ModuleEnabled()) {
                         // A shared skin material/property must not transmit this actor's layer.
-                        material = PNS::PrivateNormalMaterial(geo);
+                        material = PNS::PrivateNormalMaterial(a_actorID, geo);
                         if (!material) return RE::BSVisit::BSVisitControl::kContinue;
                     }
-                    if (Config::GetSingleton().GetDebugTexture())
+                    // All resources are ready. Retire the previous layer only now;
+                    // this also recovers the original diffuse across repeated debug bakes.
+                    PNS::RetireInstalledGeometry(a_actorID, geo);
+                    auto originalDiffuse = material->diffuseTexture;
+                    const bool debugOverride = Config::GetSingleton().GetDebugTexture();
+                    if (debugOverride)
                         material->diffuseTexture = normalmap;
                     material->normalTexture = normalmap;
+                    if (restoreBase)
+                        PNS::RecordInstalledLayer(actor, geo, material, normalmap.get(), restoreBase.get(),
+                            debugOverride, originalDiffuse.get());
 					ActorVertexHasher::GetSingleton().RegisterCheckTexture(actor, geo);
                     InsertLastNormalMap(a_actorID, found->slot, found->textureName);
                     logger::info("{:x}::{}::{} : update object normalmap done", a_actorID, a_actorName, geo->name.c_str());
@@ -1143,45 +1188,61 @@ namespace Mus {
 
 	bool TaskManager::RemoveNormalMap(RE::Actor* a_actor)
     {
-        if (IsInvalidActor(a_actor))
-            return false;
+        if (IsInvalidActor(a_actor)) return false;
+        const auto actorID = a_actor->formID;
+        if (!IsExistLastNormalMap(actorID) && !PNS::HasInstalledLayer(actorID)) return true;
 
-		if (!IsExistLastNormalMap(a_actor->formID))
-            return true;
-
-        std::vector<RE::BSGeometry*> restoreGeometries;
+        MaterialLock materialLock;
+        std::unordered_set<RE::BSGeometry*> restoreGeometries;
         RE::BSVisit::TraverseScenegraphGeometries(a_actor->loadedData->data3D.get(), [&](RE::BSGeometry* geometry) {
-            if (geometry) restoreGeometries.push_back(geometry);
+            if (geometry) restoreGeometries.insert(geometry);
             return RE::BSVisit::BSVisitControl::kContinue;
         });
+        PNS::PruneInstalledLayers(actorID, restoreGeometries);
+        bool restoredAll = true;
         for (auto geo : restoreGeometries)
         {
-            using Feature = RE::BSShaderMaterial::Feature;
-            if (!geo || geo->name.empty())
+            const bool ownedLayer = PNS::OwnsInstalledGeometry(actorID, geo);
+            // An external material/wrapper now owns this shape. Retire only our
+            // stale bookkeeping (and a debug diffuse still demonstrably ours).
+            if (!ownedLayer && PNS::RetireInstalledGeometry(actorID, geo)) continue;
+            auto* lightingShader = netimmerse_cast<RE::BSLightingShaderProperty*>(
+                geo->GetGeometryRuntimeData().shaderProperty.get());
+            auto* material = lightingShader ? skyrim_cast<RE::BSLightingShaderMaterialBase*>(lightingShader->material) : nullptr;
+            if (!lightingShader || !material || !material->normalTexture ||
+                !lightingShader->flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kModelSpaceNormals)) {
+                if (ownedLayer) restoredAll = false;
                 continue;
-            if (!geo->GetGeometryRuntimeData().shaderProperty)
-                continue;
-            auto effect = geo->GetGeometryRuntimeData().shaderProperty.get();
-            auto lightingShader = netimmerse_cast<RE::BSLightingShaderProperty*>(effect);
-            if (!lightingShader || !lightingShader->flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kModelSpaceNormals))
-                continue;
-            RE::BSLightingShaderMaterialBase* material = skyrim_cast<RE::BSLightingShaderMaterialBase*>(lightingShader->material);
-            if (!material || !material->normalTexture || !material->textureSet)
-                continue;
+            }
             // Include generated overlays, but leave unrelated mods' replacements alone.
             if (material->normalTexture->name.empty() || !IsCreatedByMDNM(material->normalTexture->name.c_str()))
                 continue;
-            std::string texturePath = lowLetter(GetTexturePath(material->textureSet.get(), RE::BSTextureSet::Texture::kNormal));
-            if (texturePath.empty())
+            // A retired private layer may retain its Mu name after an external
+            // replacement. Only a registered base or a live owned layer can be reset.
+            if (!ownedLayer && !Shader::TextureLoadManager::GetSingleton().OwnsNamedTexture(material->normalTexture.get()))
                 continue;
+            if (!material->textureSet) {
+                restoredAll = false;
+                continue;
+            }
+            std::string texturePath = lowLetter(GetTexturePath(material->textureSet.get(), RE::BSTextureSet::Texture::kNormal));
+            if (texturePath.empty()) {
+                restoredAll = false;
+                continue;
+            }
             RE::NiPointer<RE::NiSourceTexture> texture;
             Shader::TextureLoadManager::GetSingleton().LoadTexture(texturePath.c_str(), 1, texture, false);
-            if (!texture)
+            if (!texture) {
+                restoredAll = false;
                 continue;
+            }
             material->normalTexture = texture;
+            PNS::RetireInstalledGeometry(actorID, geo);
         }
-        RemoveLastNormalMap(a_actor->formID);
-        return true;
+        // The distance sweep uses this registration to retry failed restores.
+        // Successful shapes have already released their pregnancy resource pins.
+        if (restoredAll) RemoveLastNormalMap(actorID);
+        return restoredAll;
     }
 
 	EventResult TaskManager::ProcessEvent(const SKSE::NiNodeUpdateEvent* evn, RE::BSTEventSource<SKSE::NiNodeUpdateEvent>*)
@@ -1557,6 +1618,55 @@ namespace Mus {
 unsigned PNS::MuUpdateDelayFrames() { return Mus::Config::GetSingleton().GetUpdateDelayTick(); }
 bool PNS::QueueMuSlots(RE::Actor* actor, std::uint32_t slots) {
     if (!ModuleEnabled() || !SessionActive()) return false;
-    return Mus::TaskManager::GetSingleton().QUpdateNormalMap(actor, slots);
+    return Mus::TaskManager::GetSingleton().QUpdateNormalMap(actor, slots, true);
 }
 bool PNS::QueueMuBody(RE::Actor* actor) { return QueueMuSlots(actor, 1u << RE::BIPED_OBJECT::kBody); }
+
+bool PNS::QueueLayerRestore(std::function<void()> restore) {
+    if (!ModuleEnabled() || !SessionActive() || !restore) return false;
+    Mus::TaskManager::GetSingleton().RegisterDelayTask(std::move(restore));
+    return true;
+}
+
+RE::NiSourceTexturePtr PNS::ResolveRestoredBase(RE::NiSourceTexture* savedBase) {
+    if (!savedBase || savedBase->name.empty() || !savedBase->rendererTexture) return {};
+    const auto name = savedBase->name.c_str();
+    auto& textures = Mus::Shader::TextureLoadManager::GetSingleton();
+    RE::NiSourceTexturePtr base;
+    if (textures.CreateSourceTexture(name, base) < 0 || !base) return {};
+    if (base->rendererTexture && base->rendererTexture->texture && base->rendererTexture->resourceView) return base;
+    // An evicted base can be rebuilt from the saved resources. Use the named
+    // base so Mu can still release it when the actor moves out of range.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture =
+        reinterpret_cast<ID3D11Texture2D*>(savedBase->rendererTexture->texture);
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view =
+        reinterpret_cast<ID3D11ShaderResourceView*>(savedBase->rendererTexture->resourceView);
+    if (textures.CreateNiTexture(name, texture, view, base) < 0) return {};
+    return base;
+}
+
+RE::NiSourceTexturePtr PNS::CreatePrivateNormalTexture(const std::string& sourceName,
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture,
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view) {
+    if (!texture || !view) return {};
+    // CreateTexture allocates the engine object; CreateSourceTexture would also
+    // register/reuse it in Mu's mutable name cache, which is deliberately bypassed.
+    static std::uint64_t sequence = 0; // game thread only
+    const auto allocationName = sourceName + "::PNSPrivate::" + std::to_string(++sequence);
+    RE::NiSourceTexturePtr result{static_cast<RE::NiSourceTexture*>(
+        Mus::Shader::TextureLoadManager::CreateTexture(allocationName.c_str()))};
+    if (!result || result->rendererTexture) return {};
+    auto renderer = std::make_unique<RE::BSGraphics::Texture>();
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    renderer->width = static_cast<std::uint16_t>(desc.Width);
+    renderer->height = static_cast<std::uint16_t>(desc.Height);
+    renderer->mips = static_cast<std::uint8_t>(desc.MipLevels);
+    renderer->format = static_cast<std::uint8_t>(desc.Format);
+    renderer->texture = reinterpret_cast<REX::W32::ID3D11Texture2D*>(texture.Detach());
+    renderer->resourceView = reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(view.Detach());
+    result->rendererTexture = renderer.release();
+    // Preserve the canonical metadata consumed by Mu and Dino path parsers.
+    Mus::nif::setBSFixedString(result->name, sourceName.c_str());
+    return result;
+}

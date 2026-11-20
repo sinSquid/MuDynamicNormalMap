@@ -9,19 +9,26 @@
 
 namespace PNS {
 
-    bool NormalMapApplicator::Apply(RE::Actor* actor, ActorState& state, bool forceUpdate) {
+    bool NormalMapApplicator::Apply(RE::Actor* actor, ActorState& state, bool forceUpdate, bool installedLayer) {
         if (!actor || !actor->Is3DLoaded()) {
             logger::debug("Apply: actor null or 3D not loaded (actor={:p})", (void*)actor);
             return false;
         }
 
         auto& skee = SKEEInterface::GetSingleton();
-        if (!skee.GetBodyMorphInterface()) return false;
+        if (!skee.GetBodyMorphInterface()) {
+            state.SuppressLayer(installedLayer);
+            return false;
+        }
 
         if (Config::GetSingleton().GetDynamicTextures().enabled) {
             const auto& config = Config::GetSingleton();
             float amount = Rendering::NormalizeMorph(MorphEvaluator::GetMorphValue(actor),config.GetMorphMin(),config.GetMorphMax());
             if (debugPartition_ >= 0 && actor == RE::PlayerCharacter::GetSingleton()) amount = std::clamp(debugPartition_ / 10.0f,0.0f,1.0f);
+            if (amount == 0.0f && (installedLayer || state.currentMorph != 0.0f || !state.currentTexture.empty())) {
+                state.SuppressLayer(installedLayer);
+                return false;
+            }
             // The first observation and forced equipment refresh must also queue
             // zero, so a previously installed pregnancy normal is restored by Mu.
             if (state.currentPartition >= 0 && amount == state.currentMorph && !forceUpdate) return false;
@@ -38,6 +45,7 @@ namespace PNS {
             if (state.nodeName.empty()) {
                 logger::debug("Apply: No valid body node for {:08X} (tried {} node names)",
                              actor->GetFormID(), Config::GetSingleton().GetNodeNames().size());
+                state.SuppressLayer(installedLayer);
                 return false;
             }
             logger::debug("Apply: Found node '{}' for {:08X}", state.nodeName, actor->GetFormID());
@@ -52,6 +60,10 @@ namespace PNS {
                 state.raceEditorID = currentRace;
                 state.nodeName = FindNodeName(actor);
                 forceUpdate = true;
+                if (state.nodeName.empty()) {
+                    state.SuppressLayer(installedLayer);
+                    return false;
+                }
             }
         }
 
@@ -89,9 +101,9 @@ namespace PNS {
 
         // Partition 0 means no pregnancy texture needed
         if (partition == 0) {
-            if (state.currentPartition != 0 || forceUpdate) {
+            if (state.currentPartition != 0 || forceUpdate || installedLayer) {
                 logger::debug("Apply: {:08X} partition=0, resetting from p={}", actor->GetFormID(), state.currentPartition);
-                return Reset(actor, state);
+                return Reset(actor, state, installedLayer);
             }
             logger::debug("Apply: {:08X} partition=0, already at default", actor->GetFormID());
             return false;
@@ -106,6 +118,9 @@ namespace PNS {
                      texPath.empty() ? "(NOT FOUND)" : texPath);
 
         if (texPath.empty()) {
+            // The previous stage/race texture is not a valid substitute for a
+            // missing requested target. Restore it through the independent queue.
+            state.SuppressLayer(installedLayer);
             return false;
         }
 
@@ -122,7 +137,9 @@ namespace PNS {
         return true;
     }
 
-    bool NormalMapApplicator::Reset(RE::Actor* actor, ActorState& state) {
+    bool NormalMapApplicator::Reset(RE::Actor* actor, ActorState& state, bool installedLayer) {
+        state.SuppressLayer(installedLayer);
+        if (state.restorePending) return false;
         if (!QueueMuBody(actor)) return false;
         state.currentMorph = 0;
         state.currentPartition = 0;

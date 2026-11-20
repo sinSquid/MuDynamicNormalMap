@@ -1,0 +1,19 @@
+Local integration: Mu Dynamic NormalMap + Pregnancy Normal Map++ 3.0 beta 2
+Date: 2026-11-20
+
+The Pregnancy module is adapted from Muzako's GPL-3.0-only source release.
+The original LICENSE and NOTICE are retained alongside this file.
+The original NOTICE describes the upstream standalone package and its dependency
+versions; those version statements are not a manifest of this local build.
+
+This integration uses the existing Mu Dynamic NormalMap 2.1.13 toolchain and
+CommonLib dependency set. Mu's original MIT license is preserved separately.
+The newly added nlohmann/json v3.11.3 dependency retains its MIT license.
+
+Corresponding local integration source:
+E:/code-lib/MuDynamicNormalMap
+Reference source:
+E:/code-lib/Pregnancy Normal Map Plus Plus Source 3.0-beta2
+
+Pregnancy configuration is initially ModuleEnabled=false. Existing Mu default
+and user settings are preserved. No optional DinoRMF companion is included.

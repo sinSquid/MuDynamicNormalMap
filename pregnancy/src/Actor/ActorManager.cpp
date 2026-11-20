@@ -6,11 +6,15 @@
 #include "Core/TextureCache.h"
 #include "Compat/BodyProviders.h"
 #include "Lifecycle.h"
+#include "Rendering/MuBridge.h"
+#include "RestoreQueue.h"
 
 namespace PNS {
 
     std::pair<float, std::string> ActorManager::GetPregnancyLayer(RE::FormID actor) {
         if (!ModuleEnabled() || !SessionActive()) return {};
+        // Rendering may run before the next actor poll after a filter change.
+        if (!ShouldProcess(RE::TESForm::LookupByID<RE::Actor>(actor))) return {};
         std::lock_guard lock(mutex_);
         auto it = trackedActors_.find(actor);
         if (it == trackedActors_.end()) return {};
@@ -24,11 +28,77 @@ namespace PNS {
     }
 
     void ActorManager::UpdatePregnancy(RE::Actor* actor, bool forceUpdate) {
-        if (!ModuleEnabled() || !SessionActive() || !actor || !ShouldProcess(actor)) return;
+        if (!ModuleEnabled() || !SessionActive() || !actor || !actor->Is3DLoaded()) return;
 
+        const bool eligible = ShouldProcess(actor);
+        const bool installedLayer = HasInstalledLayer(actor->GetFormID());
         std::lock_guard lock(mutex_);
+        if (!eligible) {
+            auto found = trackedActors_.find(actor->GetFormID());
+            if (found == trackedActors_.end() && installedLayer) {
+                GetOrCreateState(actor);
+                found = trackedActors_.find(actor->GetFormID());
+            }
+            if (found != trackedActors_.end()) {
+                found->second.SuppressLayer(installedLayer);
+                QueueRestore(actor->GetFormID(), found->second);
+            }
+            return;
+        }
         auto& state = GetOrCreateState(actor);
-        NormalMapApplicator::Apply(actor, state, forceUpdate);
+        // Eligibility alone cannot complete physical restoration. In particular,
+        // Mu's normal queue can report a filtered no-op as success. Finish the
+        // independent restore before submitting a replacement layer.
+        if (state.restorePending) {
+            QueueRestore(actor->GetFormID(), state);
+            return;
+        }
+        NormalMapApplicator::Apply(actor, state, forceUpdate, installedLayer);
+        // Ordinary zero morphs and unavailable legacy stage textures use the
+        // same physical restore path as exclusion, independent of Mu categories.
+        if (state.restorePending) QueueRestore(actor->GetFormID(), state);
+    }
+
+    void ActorManager::QueueRestore(RE::FormID id, ActorState& state) {
+        if (!state.restorePending || state.restoreQueued) return;
+        const auto session = SessionGeneration();
+        const auto request = ++nextRestoreRequest_;
+        state.ScheduleRestore(request, [this, id, session, request] {
+            return QueueLayerRestore([this, id, session, request] { RunRestore(id, session, request); });
+        });
+    }
+
+    void ActorManager::RunRestore(RE::FormID id, std::uint64_t session, std::uint64_t request) {
+        if (!ModuleEnabled() || !SessionActive() || session != SessionGeneration()) return;
+        {
+            std::lock_guard lock(mutex_);
+            const auto found = trackedActors_.find(id);
+            if (found == trackedActors_.end() || !found->second.TakeRestore(request)) return;
+        }
+        auto* actor = RE::TESForm::LookupByID<RE::Actor>(id);
+        if (!actor || !actor->Is3DLoaded()) {
+            RemoveActor(id);
+            return;
+        }
+        // No actor-state mutex is held while restoring renderer-owned resources.
+        bool restored = false;
+        try { restored = RestoreInstalledLayer(actor); }
+        catch (const std::exception& error) {
+            logger::warn("Pregnancy restoration deferred for {:08X}: {}", id, error.what());
+        }
+        catch (...) { logger::warn("Pregnancy restoration deferred for {:08X}", id); }
+        {
+            std::lock_guard lock(mutex_);
+            const auto found = trackedActors_.find(id);
+            if (found == trackedActors_.end() || !found->second.FinishRestore(request, restored)) return;
+            if (!restored) {
+                QueueRestore(id, found->second);
+                return;
+            }
+        }
+        // Re-evaluate only after the old physical layer is gone. A category-
+        // filtered/no-op new request now cannot strand that old layer.
+        if (session == SessionGeneration() && ShouldProcess(actor)) UpdatePregnancy(actor, true);
     }
 
     void ActorManager::ProcessAllLoaded() {
@@ -70,15 +140,17 @@ namespace PNS {
     }
 
     void ActorManager::Clear() {
-        std::lock_guard lock(mutex_);
         BodyProviders::Clear();
+        ClearInstalledLayers();
+        std::lock_guard lock(mutex_);
         trackedActors_.clear();
         logger::debug("ActorManager: Cleared all tracked actors");
     }
 
     void ActorManager::RemoveActor(RE::FormID formID) {
-        std::lock_guard lock(mutex_);
         BodyProviders::Forget(formID);
+        ForgetInstalledLayer(formID);
+        std::lock_guard lock(mutex_);
         trackedActors_.erase(formID);
     }
 
@@ -97,11 +169,15 @@ namespace PNS {
         if (auto* player = RE::PlayerCharacter::GetSingleton()) {
             ProcessActor(player);
         }
-        std::lock_guard lock(mutex_);
-        std::erase_if(trackedActors_,[](const auto& entry) {
-            auto* actor = RE::TESForm::LookupByID<RE::Actor>(entry.first);
-            return !actor || !actor->Is3DLoaded();
-        });
+        std::vector<RE::FormID> unloaded;
+        {
+            std::lock_guard lock(mutex_);
+            for (const auto& [id, state] : trackedActors_) {
+                auto* actor = RE::TESForm::LookupByID<RE::Actor>(id);
+                if (!actor || !actor->Is3DLoaded()) unloaded.push_back(id);
+            }
+        }
+        for (const auto id : unloaded) RemoveActor(id);
     }
 
     ActorState& ActorManager::GetOrCreateState(RE::Actor* actor) {

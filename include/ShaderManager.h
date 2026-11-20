@@ -342,6 +342,11 @@ namespace Mus {
 
 			std::int8_t CreateNiTexture(const std::string& name, Microsoft::WRL::ComPtr<ID3D11Texture2D> dstTex, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> dstSRV, RE::NiPointer<RE::NiSourceTexture>& output);
 			Microsoft::WRL::ComPtr<ID3D11Texture2D> GetNiTexture(const std::string& name);
+            bool OwnsNamedTexture(const RE::NiSourceTexture* texture) const {
+                if (!texture || texture->name.empty()) return false;
+                const auto found = niTextures.find(texture->name.c_str());
+                return found != niTextures.end() && found->second.get() == texture;
+            }
             void ReleaseNiTexture(const std::string& name);
 
 			bool PrintTexture(const std::string& filePath, ID3D11Texture2D* texture);

@@ -43,9 +43,11 @@ $pregnancyConfig = 'SKSE\Plugins\PregnancyNormalMapPlusPlus\Config.json'
 if (!(Test-Path -LiteralPath (Join-Path $muOutput $pregnancyConfig))) {
     $muArtifacts[$pregnancyConfig] = Join-Path $PSScriptRoot "pregnancy\data\$pregnancyConfig"
 }
-foreach ($notice in 'LICENSE', 'NOTICE') {
+foreach ($notice in 'LICENSE', 'NOTICE', 'INTEGRATION-NOTICE.txt') {
     $muArtifacts["licenses\PregnancyNormalMapPlusPlus\$notice"] = Join-Path $PSScriptRoot "pregnancy\$notice"
 }
+$muArtifacts['licenses\MuDynamicNormalMap\LICENSE'] = Join-Path $PSScriptRoot 'LICENSE'
+$muArtifacts['licenses\nlohmann-json\LICENSE.MIT'] = Join-Path $PSScriptRoot 'pregnancy\licenses\nlohmann-json\LICENSE.MIT'
 foreach ($muShader in $muShaders) {
     $muArtifacts["SKSE\Plugins\MuDynamicNormalMap\Shader\$muShader.hlsl"] = Join-Path $PSScriptRoot "shader\$muShader.hlsl"
     $muArtifacts["SKSE\Plugins\MuDynamicNormalMap\Shader\Compiled\CS_$muShader.cso"] = Join-Path $PSScriptRoot "shader\Compiled\CS_$muShader.cso"
