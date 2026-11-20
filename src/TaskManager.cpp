@@ -1,4 +1,8 @@
 #include "TaskManager.h"
+#include "Rendering/MuBridge.h"
+#include "Compat/OSkin.h"
+#include "Compat/SkinPaths.h"
+#include "Lifecycle.h"
 #include "SettingsCatalog.h"
 
 namespace Mus {
@@ -584,6 +588,11 @@ namespace Mus {
 			if (!material || !material->normalTexture || material->normalTexture->name.empty())
 				continue;
 			std::string texturePath = GetOriginalTexturePath(lowLetter(material->normalTexture->name.c_str()));
+            if (PNS::ModuleEnabled() && PNS::OSkin::Active() && material->textureSet) {
+                const auto* path = material->textureSet->GetTexturePath(RE::BSTextureSet::Texture::kNormal);
+                if (path && *path && PNS::SkinPaths::Stale(texturePath, path))
+                    texturePath = FixTexturePath(PNS::SkinPaths::Relative(path));
+            }
 			if (texturePath.empty() || !IsExistFile(texturePath, ExistType::textures))
 			{
 				if (material->textureSet)
@@ -625,8 +634,14 @@ namespace Mus {
 
 				if (!Config::GetSingleton().GetRevertNormalMap())
                 {
-                    if (IsExistLastNormalMap(id, newSet.slot, newSet.textureName))
+                    if (IsExistLastNormalMap(id, newSet.slot, newSet.textureName)) {
+                        // This fast reattach also writes a material, before the async result.
+                        if (PNS::ModuleEnabled()) {
+                            material = PNS::PrivateNormalMaterial(geo);
+                            if (!material) continue;
+                        }
                         Shader::TextureLoadManager::CreateSourceTexture(newSet.textureName, material->normalTexture);
+                    }
                 }
                 newUpdateSet.push_back(std::make_pair(geo, std::move(newSet)));
 
@@ -658,7 +673,8 @@ namespace Mus {
 
         // Keep the busy state until the frame-thread completion is consumed.
         auto busyTicket = ActorWorkState::Claim(actorWorkState, a_actorID);
-        auto func = [this, a_actorID, a_actorName, a_geoData, sourceRoot, busyTicket = std::move(busyTicket), a_updateSet = std::move(a_updateSet)]() mutable {
+        const auto session = PNS::SessionGeneration();
+        auto func = [this, a_actorID, a_actorName, a_geoData, sourceRoot, session, busyTicket = std::move(busyTicket), a_updateSet = std::move(a_updateSet)]() mutable {
           // A stored future retains its callable; the frame completion owns busy.
           auto activeTicket = std::move(busyTicket);
           try {
@@ -682,7 +698,10 @@ namespace Mus {
                 return;
             }
 
-            RegisterDelayTask([this, a_actorID, a_actorName, sourceRoot, busyTicket = activeTicket, textures = std::move(textures)]() {
+            auto* tasks = SKSE::GetTaskInterface();
+            if (!tasks) return;
+            tasks->AddTask([this, a_actorID, a_actorName, sourceRoot, session, busyTicket = activeTicket, textures = std::move(textures)]() {
+                if (stoppingComputations.load() || session != PNS::SessionGeneration() || !PNS::SessionActive()) return;
                 auto actor = GetFormByID<RE::Actor*>(a_actorID);
                 if (IsInvalidActor(actor))
                 {
@@ -708,6 +727,21 @@ namespace Mus {
                     QUpdateNormalMap(actor, BipedObjectSlot::kAll);
                     return;
                 }
+                // Equipment can replace a shape without replacing the actor's root.
+                // Do not install a cached/baked old mesh via the slot/path fallback below.
+                std::unordered_set<RE::BSGeometry*> liveShapes;
+                RE::BSVisit::TraverseScenegraphGeometries(root, [&](RE::BSGeometry* geometry) {
+                    liveShapes.insert(geometry);
+                    return RE::BSVisit::BSVisitControl::kContinue;
+                });
+                if (std::ranges::any_of(textures, [&](const auto& result) { return !liveShapes.contains(result.geometry); })) {
+                    geometryRetry.Forget(a_actorID);
+                    QUpdateNormalMap(actor, BipedObjectSlot::kAll);
+                    return;
+                }
+                // Serialize material installation and GPU composition with the renderer.
+                Shader::ShaderLocker rendererLock(Shader::ShaderManager::GetSingleton().GetContext());
+                Shader::ShaderLockGuard rendererGuard(rendererLock);
                 std::unordered_map<std::string, RE::NiSourceTexturePtr> createdTextures;
                 RE::BSVisit::TraverseScenegraphGeometries(root, [&](RE::BSGeometry* geo) -> RE::BSVisit::BSVisitControl {
                     using Feature = RE::BSShaderMaterial::Feature;
@@ -795,6 +829,11 @@ namespace Mus {
                         if (found == textures.end())
                             return RE::BSVisit::BSVisitControl::kContinue;
                     }
+                    if (PNS::ModuleEnabled() && PNS::OSkin::Active() && material->textureSet) {
+                        const auto* path = material->textureSet->GetTexturePath(RE::BSTextureSet::Texture::kNormal);
+                        if (PNS::SkinPaths::Stale(found->texturePath, path ? path : ""))
+                            return RE::BSVisit::BSVisitControl::kContinue;
+                    }
                     if (!found->texture || !found->texture->normalmapTexture2D || !found->texture->normalmapShaderResourceView)
                         return RE::BSVisit::BSVisitControl::kContinue;
 
@@ -805,7 +844,24 @@ namespace Mus {
                     }
                     else
                     {
-                        if (Shader::TextureLoadManager::GetSingleton().CreateNiTexture(found->textureName, found->texture->normalmapTexture2D, found->texture->normalmapShaderResourceView, normalmap) < 0 || !normalmap || !normalmap->rendererTexture || !normalmap->rendererTexture->texture || !normalmap->rendererTexture->resourceView)
+                        // Never mutate the shared Mu cache wrapper with an actor-specific layer.
+                        auto texture = found->texture->normalmapTexture2D;
+                        auto view = found->texture->normalmapShaderResourceView;
+                        if (PNS::ModuleEnabled()) {
+                            const bool dinoBody = found->slot == RE::BIPED_OBJECT::kBody && PNS::HasDinoBridge();
+                            const bool oskinSource = PNS::OSkin::Active() && (found->slot == RE::BIPED_OBJECT::kBody ||
+                                PNS::SkinPaths::IsPackPath(found->texturePath));
+                            if ((dinoBody || oskinSource) && !PNS::ReadAssignedNormal(found->texturePath, texture, view))
+                                return RE::BSVisit::BSVisitControl::kContinue;
+                            if (found->slot == RE::BIPED_OBJECT::kBody) {
+                                std::vector<RE::BSGeometry*> shapes;
+                                for (const auto& result : textures)
+                                    if (result.slot == found->slot && result.textureName == found->textureName)
+                                        shapes.push_back(result.geometry);
+                                PNS::ComposeMuBody(actor, shapes, texture, view, found->texturePath, dinoBody);
+                            }
+                        }
+                        if (Shader::TextureLoadManager::GetSingleton().CreateNiTexture(found->textureName, texture, view, normalmap) < 0 || !normalmap || !normalmap->rendererTexture || !normalmap->rendererTexture->texture || !normalmap->rendererTexture->resourceView)
                         {
                             logger::error("{:x}::{}::{} : Failed to create NiTexture", a_actorID, a_actorName, geo->name.c_str());
                             return RE::BSVisit::BSVisitControl::kContinue;
@@ -818,6 +874,11 @@ namespace Mus {
                         }
                     }
 
+                    if (PNS::ModuleEnabled()) {
+                        // A shared skin material/property must not transmit this actor's layer.
+                        material = PNS::PrivateNormalMaterial(geo);
+                        if (!material) return RE::BSVisit::BSVisitControl::kContinue;
+                    }
                     if (Config::GetSingleton().GetDebugTexture())
                         material->diffuseTexture = normalmap;
                     material->normalTexture = normalmap;
@@ -1492,3 +1553,10 @@ namespace Mus {
         }
 	}
 }
+
+unsigned PNS::MuUpdateDelayFrames() { return Mus::Config::GetSingleton().GetUpdateDelayTick(); }
+bool PNS::QueueMuSlots(RE::Actor* actor, std::uint32_t slots) {
+    if (!ModuleEnabled() || !SessionActive()) return false;
+    return Mus::TaskManager::GetSingleton().QUpdateNormalMap(actor, slots);
+}
+bool PNS::QueueMuBody(RE::Actor* actor) { return QueueMuSlots(actor, 1u << RE::BIPED_OBJECT::kBody); }

@@ -1,5 +1,6 @@
 
 #include "SettingsMenu.h"
+#include "../pregnancy/src/Lifecycle.h"
 
 namespace {
     /**
@@ -196,6 +197,7 @@ namespace {
     {
         if (!SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* message) 
         {
+            PNS::HandleMessage(message);
             switch (message->type) 
             {
                 // Skyrim lifecycle events.

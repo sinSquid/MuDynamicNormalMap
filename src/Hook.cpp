@@ -1,4 +1,5 @@
 #include "hook.h"
+#include "../pregnancy/src/Lifecycle.h"
 #include <xbyak/xbyak.h>
 
 namespace Mus {
@@ -90,6 +91,7 @@ namespace Mus {
 		auto main = RE::Main::GetSingleton();
 		if (main->GetRuntimeData().quitGame)
 		{
+			PNS::Shutdown();
 			QuitGameEvent e;
 			g_quitGameEventDispatcher.dispatch(e);
 		}
@@ -119,6 +121,8 @@ namespace Mus {
 			const auto menu = RE::UI::GetSingleton();
 			IsGamePaused.store(((e.gamePaused || (menu && menu->numPausesGame > 0)) && !IsRaceSexMenu.load()) || IsMainMenu.load());
 			currentTime = std::clock();
+			if (!IsSaveLoading.load() && !IsInLoading.load() && !IsGamePaused.load())
+				PNS::TickFrame();
 			g_frameEventDispatcher.dispatch(e);
 		}
 	}

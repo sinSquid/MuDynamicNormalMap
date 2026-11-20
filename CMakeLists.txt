@@ -82,6 +82,15 @@ set(sources
         ${CMAKE_CURRENT_BINARY_DIR}/version.rc
 )
 
+# Pregnancy is an internal module of Mu, including its adapted lifecycle entry point.
+file(GLOB_RECURSE pregnancy_sources CONFIGURE_DEPENDS pregnancy/src/*.cpp)
+file(GLOB_RECURSE pregnancy_headers CONFIGURE_DEPENDS pregnancy/src/*.h)
+list(APPEND sources ${pregnancy_sources})
+list(APPEND headers ${pregnancy_headers})
+set_source_files_properties(${pregnancy_sources} PROPERTIES
+    SKIP_PRECOMPILE_HEADERS ON
+    COMPILE_DEFINITIONS "NOMINMAX;WIN32_LEAN_AND_MEAN")
+
 source_group(
         TREE ${CMAKE_CURRENT_SOURCE_DIR}
         FILES
@@ -101,6 +110,11 @@ find_package(xxhash CONFIG REQUIRED)
 find_package(lz4 CONFIG REQUIRED)
 find_package(TBB CONFIG REQUIRED)
 find_package(tinygltf)
+include(FetchContent)
+FetchContent_Declare(nlohmann_json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+    URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d)
+FetchContent_MakeAvailable(nlohmann_json)
 
 execute_process(
     COMMAND python "${CMAKE_SOURCE_DIR}/include/bc7e_ispc__gen.py"
@@ -136,6 +150,7 @@ target_include_directories(
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/shader>
         $<INSTALL_INTERFACE:src>
         ${DETOURS_INCLUDE_DIRS}
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/pregnancy/src>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/extern/tinygltf>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ExtraRE/include>
@@ -151,9 +166,25 @@ target_link_libraries(
         lz4::lz4
         xxHash::xxhash
         TBB::tbb
+        nlohmann_json::nlohmann_json
+        d3d11 d3dcompiler dxgi
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/vcpkg_installed/x64-windows-static-md/lib/detours.lib>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/vcpkg_installed/x64-windows-static-md/lib/DirectXTex.lib>
 )
+
+set(PNS_DINO_ARCHIVE "" CACHE FILEPATH "Optional original DinoRMF 1.4.1 archive")
+if(PNS_DINO_ARCHIVE)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(dino_dir "${CMAKE_CURRENT_BINARY_DIR}/dino-compat-source")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        pregnancy/tools/prepare-dino.py pregnancy/patches/dino/PregnancyBridge.h "${PNS_DINO_ARCHIVE}")
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/pregnancy/tools/prepare-dino.py"
+        "${PNS_DINO_ARCHIVE}" "${dino_dir}" COMMAND_ERROR_IS_FATAL ANY)
+    add_library(DinoRMF SHARED "${dino_dir}/src/main.cpp" "${dino_dir}/src/plugin.cpp" "${dino_dir}/src/UI.cpp")
+    target_link_libraries(DinoRMF PRIVATE CommonLibSSE::CommonLibSSE d3d11 dxguid)
+    target_compile_options(DinoRMF PRIVATE /bigobj /utf-8 /Zc:preprocessor)
+    target_compile_definitions(DinoRMF PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+endif()
 
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/build/bc7e_avx.obj DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${BUILD_NAME})
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/build/bc7e_avx2.obj DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/${BUILD_NAME})

@@ -1,0 +1,125 @@
+{
+  "ModuleEnabled": false,
+  "MorphNames": [
+    "PregnancyBelly"
+  ],
+  "IncludePresetMorphsInPregnancy": false,
+  "PregnancyMorphKeys": [],
+  "MorphMode": 0,
+  "MorphCombineMode": 0,
+  "MorphValueMin": 0,
+  "MorphValueMax": 1,
+  "NumberOfPartitions": 0,
+  "EnablePlayer": 1,
+  "IgnoreMorphKeys": [],
+  "NodeNames": [
+    "3BA",
+    "3BA_Naked",
+    "3BA_Clothing",
+    "3BBB",
+    "CBBE",
+    "BHUNP",
+    "BaseShape"
+  ],
+  "ForceUpdateKey": [
+    42,
+    56,
+    21
+  ],
+  "UpdateInterval": 0.5,
+  "EnableDebugMode": 0,
+  "DebugMorphChangeMult": 10.0,
+  "ActorFilter": {
+    "excludeChildren": true,
+    "excludeKeywords": [],
+    "requireFemale": true
+  },
+  "DynamicTextures": {
+    "Enabled": true,
+    "BodyProfile": "Auto",
+    "UsePregnancyTarget": true,
+    "Smoothing": 0.85,
+    "BlurRadius": 0.008,
+    "MaxResolution": 0,
+    "Profiles": {
+      "CBBE/3BA": {
+        "NodeNames": [
+          "3BA",
+          "3BA_Naked",
+          "3BA_Clothing",
+          "3BBB",
+          "CBBE",
+          "BaseShape"
+        ],
+        "CenterHeight": 0.69,
+        "RadiusHeight": 0.12,
+        "RadiusWidth": 0.105,
+        "FrontSign": 1,
+        "BreastCenterHeight": 0.83,
+        "BreastCenterOffset": 0.07,
+        "BreastRadiusWidth": 0.063,
+        "BreastRadiusHeight": 0.065,
+        "BaseNormal": "",
+        "PregnancyNormal": ""
+      },
+      "BHUNP/UNP": {
+        "NodeNames": [
+          "BHUNP",
+          "BHUNP 3BBB",
+          "UUNP",
+          "UNP",
+          "UNPB"
+        ],
+        "CenterHeight": 0.69,
+        "RadiusHeight": 0.12,
+        "RadiusWidth": 0.105,
+        "FrontSign": 1,
+        "BreastCenterHeight": 0.83,
+        "BreastCenterOffset": 0.07,
+        "BreastRadiusWidth": 0.063,
+        "BreastRadiusHeight": 0.065,
+        "BaseNormal": "",
+        "PregnancyNormal": ""
+      },
+      "Vanilla": {
+        "NodeNames": [
+          "FemaleBody",
+          "FemaleTorso",
+          "femalebody_0",
+          "femalebody_1"
+        ],
+        "CenterHeight": 0.69,
+        "RadiusHeight": 0.12,
+        "RadiusWidth": 0.105,
+        "FrontSign": 1,
+        "BreastCenterHeight": 0.83,
+        "BreastCenterOffset": 0.07,
+        "BreastRadiusWidth": 0.063,
+        "BreastRadiusHeight": 0.065,
+        "BaseNormal": "",
+        "PregnancyNormal": ""
+      },
+      "UBE": {
+        "NodeNames": [
+          "UBE",
+          "UBE Body",
+          "UBEBody",
+          "UBE 3BBB",
+          "UBE_3BA"
+        ],
+        "CenterHeight": 0.69,
+        "RadiusHeight": 0.12,
+        "RadiusWidth": 0.105,
+        "FrontSign": 1,
+        "BreastCenterHeight": 0.83,
+        "BreastCenterOffset": 0.07,
+        "BreastRadiusWidth": 0.063,
+        "BreastRadiusHeight": 0.065,
+        "BaseNormal": "",
+        "PregnancyNormal": ""
+      }
+    },
+    "BaseNormal": "textures/actors/character/female/femalebody_1_msn.dds",
+    "UseActorSkin": false
+  }
+}
