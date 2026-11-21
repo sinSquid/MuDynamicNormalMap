@@ -168,7 +168,7 @@ namespace Mus {
     inline std::string lowLetter(std::string Letter)
     {
         for (auto& str : Letter) {
-            str = tolower(str);
+            str = static_cast<char>(std::tolower(static_cast<unsigned char>(str)));
         }
         return Letter;
     }
@@ -176,7 +176,7 @@ namespace Mus {
     inline std::string highLetter(std::string Letter)
     {
         for (auto& str : Letter) {
-            str = toupper(str);
+            str = static_cast<char>(std::toupper(static_cast<unsigned char>(str)));
         }
         return Letter;
     }
@@ -505,13 +505,13 @@ namespace Mus {
     inline void ltrim(std::string& s)
     {
         s.erase(s.begin(), std::find_if(s.begin(), s.end(),
-                                        [](int c) {return !std::isspace(c); }));
+                                        [](unsigned char c) {return !std::isspace(c); }));
     }
 
     inline void rtrim(std::string& s)
     {
         s.erase(std::find_if(s.rbegin(), s.rend(),
-                             [](int c) {return !std::isspace(c); }).base(), s.end());
+                             [](unsigned char c) {return !std::isspace(c); }).base(), s.end());
     }
 
     inline void trim(std::string& s)

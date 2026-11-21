@@ -47,6 +47,9 @@ namespace RMF::PregnancyBridge {
                     texture.GetAddressOf(), view.GetAddressOf())) {
                 displayed = true;
             } else {
+                // A transient composition failure must not acknowledge this layer.
+                // Retry the same nonzero key on the next update, even after reverting.
+                if (stamp) { previousKey = 0; previousGeometry = nullptr; }
                 if (!displayed) return;
                 texture = bake;
                 view = bakeView;

@@ -32,6 +32,9 @@ namespace {
         Require(NormalizeMorph(std::numeric_limits<float>::quiet_NaN(),0,1)==0,"NaN morph");
         Require(NormalizeMorph(std::numeric_limits<float>::infinity(),0,1)==0,"infinite morph");
         Require(NormalizeMorph(0,1,1)==0,"empty range");Require(NormalizeMorph(0,2,1)==0,"reversed range");
+        const auto limit = std::numeric_limits<float>::max();
+        Require(NormalizeMorph(0,-limit,limit)==0.5f,"finite endpoints must not overflow");
+        Require(NormalizeMorph(limit,-limit,limit)==1,"finite maximum endpoint");
     }
     void MaskTests() {
         const std::vector<std::uint16_t> indices{0,1,2,0,2,3};

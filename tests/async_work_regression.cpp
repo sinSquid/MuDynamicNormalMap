@@ -9,6 +9,22 @@ static void Pump(Mus::FrameTaskQueue& queue) {
 }
 
 int main() {
+    // Bursts for one actor share a refresh only within the same due frame.
+    {
+        Mus::FrameTaskQueue burst;
+        std::vector<int> calls;
+        for (int i = 0; i < 100; ++i)
+            burst.Enqueue(1, [&] { calls.push_back(1); }, 17);
+        burst.Enqueue(1, [&] { calls.push_back(2); }, 18);
+        burst.Enqueue(1, [&] { calls.push_back(3); });
+        Pump(burst);
+        assert(calls.empty());
+        burst.Enqueue(1, [&] { calls.push_back(4); }, 17);
+        Pump(burst);
+        assert((calls == std::vector<int>{1, 2, 3}));
+        Pump(burst);
+        assert((calls == std::vector<int>{1, 2, 3, 4}));
+    }
     // Negative and zero delays run on the next pump; N runs on pump N+1.
     Mus::FrameTaskQueue queue;
     int tick = 0;

@@ -4,13 +4,16 @@ namespace Mus {
     namespace Papyrus {
         constexpr std::string_view ScriptFileName = "MuDynamicNormalMap";
         bool RegisterPapyrusFunctions(RE::BSScript::IVirtualMachine* vm);
-		extern tbb::concurrent_unordered_map<RE::FormID, float> detailStrengthMap;
+        void ClearActorOverrides();
+		void StoreDetailStrength(RE::FormID id, float strength);
+        float ReadDetailStrength(RE::FormID id, float fallback);
         enum normalmapTypes {
             detail,
             overlay,
             mask,
             max
         };
-        extern tbb::concurrent_unordered_map<RE::FormID, std::string> normalmaps[normalmapTypes::max];
+        void StoreNormalMap(RE::FormID id, normalmapTypes type, std::string path);
+        std::string ReadNormalMap(RE::FormID id, normalmapTypes type);
     }
 }

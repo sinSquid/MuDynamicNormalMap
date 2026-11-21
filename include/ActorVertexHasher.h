@@ -1,6 +1,8 @@
 #pragma once
 #include "AsyncWork.h"
+#include "VertexDetectionCycle.h"
 #include <future>
+#include <map>
 
 namespace Mus {
 	class ActorVertexHasher :
@@ -49,6 +51,7 @@ namespace Mus {
 			}
 			std::size_t GetHash() const { return hashValue; }
 			std::size_t GetOldHash() const { return oldHashValue; }
+            void AcceptBaseline() { oldHashValue = hashValue; }
             void SetCheckTexture(bool isCheck) { isCheckTexture = isCheck; }
             bool IsChangedTexture() const { return isCheckTexture && !isMDNMTexture; }
 		private:
@@ -62,7 +65,7 @@ namespace Mus {
 
 		struct GeometryHashData {
 			GeometryHash hash;
-			bool IsDynamicTriShapeAsHead = false;
+			bool refreshPending = false; // Survives interrupted scans until the refresh is queued.
 		};
 
 		bool Register(RE::Actor* a_actor, RE::BSGeometry* a_geo);
@@ -76,10 +79,11 @@ namespace Mus {
 		EventResult ProcessEvent(const SKSE::NiNodeUpdateEvent* evn, RE::BSTEventSource<SKSE::NiNodeUpdateEvent>*) override;
 
 	private:
+        static bool CanDetectGeometry(RE::BSGeometry* geometry);
         std::atomic<bool> tuningPaused = false;
 		void CheckingActorHash();
         void WaitForPendingDetection();
-		bool GetHash(RE::Actor* a_actor, GeometryHash& hashMap);
+		bool GetHash(RE::Actor* a_actor, GeometryHashData& scan);
 
 		SingleFlightGate detectionGate;
         std::atomic<bool> detectionStopped = false;
@@ -98,6 +102,7 @@ namespace Mus {
 		}
 
 		std::shared_mutex actorHashLock;
-		std::unordered_map<RE::FormID, GeometryHashData> actorHash;
+		std::map<RE::FormID, GeometryHashData> actorHash;
+        VertexDetectionCycle foregroundCycle;
 	};
 }

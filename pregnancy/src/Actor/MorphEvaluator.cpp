@@ -108,12 +108,10 @@ namespace PNS {
 
     int MorphEvaluator::ComputePartition(float morphValue, int partitionCount) {
         auto& config = Config::GetSingleton();
-        float range = config.GetMorphMax() - config.GetMorphMin();
-
-        if (range <= 0.0f || partitionCount <= 0) return 0;
+        if (partitionCount <= 0) return 0;
 
         // Normalize morph value to 0..1 within the configured range
-        float normalized = (morphValue - config.GetMorphMin()) / range;
+        const float normalized = Rendering::NormalizeMorph(morphValue, config.GetMorphMin(), config.GetMorphMax());
 
         // Treat values at or very near zero as "no override" — SKEE can report
         // tiny epsilon values even when the RaceMenu slider shows exactly 0.
@@ -121,7 +119,7 @@ namespace PNS {
         if (normalized <= kEpsilon) return 0;
 
         // Map to 1..partitionCount (partition 0 = no override)
-        int p = static_cast<int>(std::ceil(normalized * partitionCount));
+        int p = static_cast<int>(std::ceil(double(normalized) * partitionCount));
         return std::clamp(p, 1, partitionCount);
     }
 

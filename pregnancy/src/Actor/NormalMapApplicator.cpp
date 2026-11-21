@@ -39,6 +39,12 @@ namespace PNS {
             return true;
         }
 
+        const bool isFemale = actor->GetActorBase() && actor->GetActorBase()->GetSex() == RE::SEX::kFemale;
+        if (state.isFemale != isFemale) {
+            state.isFemale = isFemale;
+            state.nodeName.clear();
+            forceUpdate = true;
+        }
         // Re-check node name if empty (e.g. after equipment change)
         if (state.nodeName.empty()) {
             state.nodeName = FindNodeName(actor);
@@ -76,7 +82,7 @@ namespace PNS {
         int partitionCount = Config::GetSingleton().GetPartitions();
         auto* raceInfo = cache.GetRaceInfo(raceDir);
         if (partitionCount <= 0) {
-            partitionCount = raceInfo ? raceInfo->maxPartition : 0;
+            partitionCount = raceInfo ? raceInfo->partitionCounts[state.isFemale] : 0;
             logger::debug("Apply: Auto-detected partitionCount={} from textures (raceInfo={:p})",
                          partitionCount, (void*)raceInfo);
         } else {
@@ -191,7 +197,8 @@ namespace PNS {
         }
         auto raceDir = cache.ResolveRaceDir(raceEditorID);
         auto* raceInfo = cache.GetRaceInfo(raceDir);
-        int maxPartition = Config::GetSingleton().GetDynamicTextures().enabled ? 10 : (raceInfo ? raceInfo->maxPartition : 5);
+        const bool isFemale = player->GetActorBase() && player->GetActorBase()->GetSex() == RE::SEX::kFemale;
+        int maxPartition = Config::GetSingleton().GetDynamicTextures().enabled ? 10 : (raceInfo ? raceInfo->partitionCounts[isFemale] : 5);
 
         // Cycle: -1 → 1 → 2 → ... → maxPartition → -1
         // Skip 0 because partition 0 means "no override / use default"

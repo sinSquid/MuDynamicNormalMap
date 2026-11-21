@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Core/TextureCache.h"
 #include "Core/Config.h"
+#include <charconv>
 
 namespace PNS {
 
@@ -99,13 +100,30 @@ namespace PNS {
 
             if (!std::regex_match(filename, match, pattern)) continue;
 
-            int weightIndex = std::stoi(match[2].str());
-            int partition = std::stoi(match[3].str());
-            int sbmLevel = match[4].matched ? std::stoi(match[4].str()) : 0;
+            const auto parseIndex = [](const std::ssub_match& part, int& value) {
+                const auto digits = part.str();
+                const auto [end, error] = std::from_chars(digits.data(), digits.data() + digits.size(), value);
+                return error == std::errc{} && end == digits.data() + digits.size();
+            };
+            int weightIndex = 0, partition = 0, sbmLevel = 0;
+            if (!parseIndex(match[2], weightIndex) || !parseIndex(match[3], partition) ||
+                (match[4].matched && !parseIndex(match[4], sbmLevel))) {
+                logger::warn("TextureCache: numeric index out of range in '{}'", filename);
+                continue;
+            }
+            if (weightIndex == 0 || partition == 0 ||
+                !CaseInsensitiveEqual{}(match[1].str(), isFemale ? "female" : "male")) {
+                logger::warn("TextureCache: invalid stage/weight or gender directory in '{}'", filename);
+                continue;
+            }
 
             info.maxWeightIndex = std::max(info.maxWeightIndex, weightIndex);
             info.maxPartition = std::max(info.maxPartition, partition);
             info.maxSBMLevel = std::max(info.maxSBMLevel, sbmLevel);
+            if (sbmLevel == 0) {
+                info.weightCounts[isFemale] = std::max(info.weightCounts[isFemale], weightIndex);
+                info.partitionCounts[isFemale] = std::max(info.partitionCounts[isFemale], partition);
+            }
 
             // Store texture path relative to Data/ using backslashes (Skyrim convention)
             auto genderStr = isFemale ? "female" : "male";
@@ -146,9 +164,16 @@ namespace PNS {
             }
         }
 
-        int weightIndex = ComputeWeightIndex(actorWeight, infoIt->second.maxWeightIndex);
+        int weightCount = infoIt->second.weightCounts[isFemale];
+        if (sbmLevel > 0) {
+            weightCount = 0;
+            for (const auto& [key, path] : textures_)
+                if (CaseInsensitiveEqual{}(key.raceDir, resolved) && key.isFemale == isFemale && key.sbmLevel == sbmLevel)
+                    weightCount = std::max(weightCount, key.weightIndex);
+        }
+        int weightIndex = ComputeWeightIndex(actorWeight, weightCount);
         logger::debug("TextureCache::Get: resolved='{}' female={} weight={:.1f} -> weightIndex={} (max={}) p={} sbm={}",
-                     resolved, isFemale, actorWeight, weightIndex, infoIt->second.maxWeightIndex, partition, sbmLevel);
+                     resolved, isFemale, actorWeight, weightIndex, weightCount, partition, sbmLevel);
 
         TextureKey key{resolved, isFemale, weightIndex, partition, sbmLevel};
         if (auto it = textures_.find(key); it != textures_.end()) {
@@ -159,6 +184,7 @@ namespace PNS {
         // If SBM level not found, try without it
         if (sbmLevel > 0) {
             key.sbmLevel = 0;
+            key.weightIndex = ComputeWeightIndex(actorWeight, infoIt->second.weightCounts[isFemale]);
             if (auto it = textures_.find(key); it != textures_.end()) {
                 logger::debug("TextureCache::Get: FOUND (sbm fallback) '{}'", it->second);
                 return it->second;
@@ -206,8 +232,10 @@ namespace PNS {
 
     int TextureCache::ComputeWeightIndex(float actorWeight, int maxWeightIndex) {
         if (maxWeightIndex <= 0) return 1;
-        int index = static_cast<int>(actorWeight / (100.0f / maxWeightIndex) + 1);
-        return std::clamp(index, 1, maxWeightIndex);
+        if (!std::isfinite(actorWeight)) return 1;
+        const double scaled = std::clamp(double(actorWeight), 0.0, 100.0) / 100.0 * maxWeightIndex;
+        if (scaled >= maxWeightIndex - 1.0) return maxWeightIndex;
+        return static_cast<int>(scaled) + 1;
     }
 
     std::string TextureCache::GetPregnancyTarget(const std::string& raceDir, bool isFemale, float actorWeight) const {

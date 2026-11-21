@@ -217,9 +217,11 @@ namespace {
 
                 // Skyrim game events.
                 case SKSE::MessagingInterface::kNewGame: // Player starts a new game from main menu.
+                    Mus::Papyrus::ClearActorOverrides();
                     kNewGameFunction();
                     break;
                 case SKSE::MessagingInterface::kPreLoadGame: // Player selected a game to load, but it hasn't loaded yet.
+                    Mus::Papyrus::ClearActorOverrides();
                     Mus::IsSaveLoading.store(true);
                     // Data will be the name of the loaded save.
                     break;

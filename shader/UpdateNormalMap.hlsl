@@ -43,9 +43,23 @@ bool IsTopLeft(float2 a, float2 b)
     return (e.y > 0) || (e.y == 0 && e.x < 0);
 }
 
+uint WrapCoordinate(int coordinate, uint size)
+{
+    if ((size & (size - 1)) == 0) return (uint)coordinate & (size - 1);
+    int remainder = coordinate % (int)size;
+    return (uint)(remainder < 0 ? remainder + (int)size : remainder);
+}
+
+float3 SafeNormalize(float3 value, float3 fallback)
+{
+    float lengthSquared = dot(value, value);
+    return lengthSquared > 1e-12f && isfinite(lengthSquared) ? value * rsqrt(lengthSquared) : fallback;
+}
+
 [numthreads(64, 1, 1)]
 void CSMain(uint3 threadID : SV_DispatchThreadID)
 {
+    if (texWidth == 0 || texHeight == 0) return;
     const uint index = indicesStart + threadID.x * 3;
     if (index + 2 >= indicesEnd)
         return;
@@ -143,7 +157,7 @@ void CSMain(uint3 threadID : SV_DispatchThreadID)
             }
             if (overlayColor.a < 1.0f)
             {
-                float3 n = normalize(n0 * bary.x + n1 * bary.y + n2 * bary.z);
+                float3 n = SafeNormalize(n0 * bary.x + n1 * bary.y + n2 * bary.z, float3(0, 0, 1));
                 float4 maskColor = float4(0.5f, 0.5f, 0.5f, 0.0f);
                 if (hasMaskTexture > 0 && hasSrcTexture > 0)
                 {
@@ -161,12 +175,13 @@ void CSMain(uint3 threadID : SV_DispatchThreadID)
                     float3 normalResult;
                     if (detailColor.a > 0.0f)
                     {
-                        float3 t = normalize(t0 * bary.x + t1 * bary.y + t2 * bary.z);
-                        float3 b = normalize(b0 * bary.x + b1 * bary.y + b2 * bary.z);
+                        float3 tangentFallback = SafeNormalize(cross(n, abs(n.z) < 0.9f ? float3(0, 0, 1) : float3(0, 1, 0)), float3(1, 0, 0));
+                        float3 t = SafeNormalize(t0 * bary.x + t1 * bary.y + t2 * bary.z, tangentFallback);
+                        float3 b = SafeNormalize(b0 * bary.x + b1 * bary.y + b2 * bary.z, cross(n, tangentFallback));
 
-                        float3 ft = normalize(t - n * dot(n, t));
+                        float3 ft = SafeNormalize(t - n * dot(n, t), tangentFallback);
                         float handedness = dot(cross(n, t), b) < 0.0f ? -1.0f : 1.0f;
-                        float3 fb = normalize(cross(n, ft)) * handedness;
+                        float3 fb = SafeNormalize(cross(n, ft), cross(n, tangentFallback)) * handedness;
                         float3x3 tbn = float3x3(ft, fb, n);
 
                         float3 srcN = float3(detailColor.rgb * 2.0f - 1.0f);
@@ -175,8 +190,8 @@ void CSMain(uint3 threadID : SV_DispatchThreadID)
                             srcN.z = sqrt(max(0.0f, 1.0f - srcN.x * srcN.x - srcN.y * srcN.y));
                         }
 
-                        float3 detailNormal = normalize(mul(srcN, tbn));
-                        normalResult = normalize(lerp(n, detailNormal, detailColor.a));
+                        float3 detailNormal = SafeNormalize(mul(srcN, tbn), n);
+                        normalResult = SafeNormalize(lerp(n, detailNormal, detailColor.a), n);
                     }
                     else
                     {
@@ -197,8 +212,8 @@ void CSMain(uint3 threadID : SV_DispatchThreadID)
                 dstColor.rgb = lerp(dstColor.rgb, overlayColor.rgb, overlayColor.a);
             }
 
-            uint wrapX = (uint)x & (texWidth - 1);
-            uint wrapY = (uint)y & (texHeight - 1);
+            uint wrapX = WrapCoordinate(x, texWidth);
+            uint wrapY = WrapCoordinate(y, texHeight);
             uint2 wrapXY = uint2(wrapX, wrapY);
             dstTexture[wrapXY] = float4(dstColor.rgb, 1.0f);
         }

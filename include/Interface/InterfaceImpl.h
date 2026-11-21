@@ -13,7 +13,7 @@ namespace MDNM {
 		virtual void SetDetailStrength(RE::Actor* a_actor, float a_strength) {
 			if (!a_actor)
 				return;
-			Mus::Papyrus::detailStrengthMap[a_actor->formID] = std::clamp(a_strength, 0.0f, 1.0f);
+			Mus::Papyrus::StoreDetailStrength(a_actor->formID, a_strength);
 		}
 		virtual int SetNormalMap(RE::Actor* a_actor, const char* a_filePath, int type) {
 			if (!a_filePath)
@@ -23,7 +23,7 @@ namespace MDNM {
 				return 0;
 			if (!Mus::IsExistFile(filePath))
 				return -1;
-			Mus::Papyrus::normalmaps[type][a_actor->formID] = filePath;
+			Mus::Papyrus::StoreNormalMap(a_actor->formID, static_cast<Mus::Papyrus::normalmapTypes>(type), std::move(filePath));
 			return 1;
 		}
 	};

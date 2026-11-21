@@ -14,10 +14,7 @@ namespace Mus {
 
     class Config {
     public:
-        [[nodiscard]] static Config& GetSingleton() {
-            static Config instance;
-            return instance;
-        };
+        [[nodiscard]] static Config& GetSingleton();
 
         bool LoadLogging();
         bool LoadConfig();
@@ -310,16 +307,17 @@ namespace Mus {
             return value;
         }
 
-        static inline float GetFloatValue(std::string valuestr)
+        static inline float GetFloatValue(const std::string& text, float fallback)
         {
-            float value = 0;
-            value = strtof(valuestr.c_str(), 0);
-            return value;
+            char* end = nullptr;
+            const auto value = std::strtof(text.c_str(), &end);
+            return end == text.data() + text.size() && end != text.data() && std::isfinite(value)
+                ? value : fallback;
         }
 
         static inline bool GetBoolValue(std::string valuestr)
         {
-            return !IsSameString(valuestr, "false");
+            return valuestr != "0" && !IsSameString(valuestr, "false");
         }
 
         static inline std::uint8_t GetThirdTypeValue(std::string valuestr) //false, true, auto
@@ -429,6 +427,10 @@ namespace Mus {
         static inline bool isSubSurface(std::string filename) { return IsContainString(filename, "_sk.dds"); };
         static inline bool isEnvironment(std::string filename) { return IsContainString(filename, "_e.dds"); };
     };
+    inline Config& Config::GetSingleton() {
+        static MultipleConfig instance;
+        return instance;
+    }
     void InitialSetting();
     bool SetImmediately(bool a_Immediately);
 

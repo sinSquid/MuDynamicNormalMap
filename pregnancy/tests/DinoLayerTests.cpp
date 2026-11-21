@@ -11,6 +11,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
     std::uint64_t strength = 0;
     unsigned compositions = 0;
+    bool rejectComposition = false;
     std::string observedSkin;
     ComPtr<ID3D11Texture2D> overrideTexture;
     ComPtr<ID3D11ShaderResourceView> overrideView;
@@ -36,6 +37,7 @@ int main() {
     compose = [](std::uint32_t,RE::BSGeometry*,const char* skin,ID3D11Texture2D*,ID3D11ShaderResourceView*,
                  ID3D11Texture2D** tex,ID3D11ShaderResourceView** view) {
         ++compositions; observedSkin = skin;
+        if (rejectComposition) return false;
         overrideTexture.CopyTo(tex); overrideView.CopyTo(view);
         return true;
     };
@@ -66,5 +68,19 @@ int main() {
     strength = 0;
     layer.Update(1,geometry,"packB",install);
     Check(swaps == 3 && compositions == 2);
+    strength = 2;
+    rejectComposition = true;
+    layer.Update(1,geometry,"packB",install);
+    Check(swaps == 3 && compositions == 3);
+    rejectComposition = false;
+    layer.Update(1,geometry,"packB",install);
+    Check(swaps == 4 && compositions == 4 && visible.Get() == overrideTexture.Get());
+    strength = 3;
+    rejectComposition = true;
+    layer.Update(1,geometry,"packB",install);
+    Check(swaps == 5 && compositions == 5 && visible.Get() == raw.Get());
+    rejectComposition = false;
+    layer.Update(1,geometry,"packB",install);
+    Check(swaps == 6 && compositions == 6 && visible.Get() == overrideTexture.Get());
 }
 

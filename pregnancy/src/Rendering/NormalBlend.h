@@ -16,7 +16,9 @@ namespace PNS::Rendering {
     inline float NormalizeMorph(float value, float minimum, float maximum) {
         if (!std::isfinite(value) || !std::isfinite(minimum) ||
             !std::isfinite(maximum) || maximum <= minimum) return 0.0f;
-        return std::clamp((value - minimum) / (maximum - minimum), 0.0f, 1.0f);
+        // Finite float endpoints can still overflow a float subtraction.
+        return static_cast<float>(std::clamp((double(value) - minimum) /
+            (double(maximum) - minimum), 0.0, 1.0));
     }
 
     struct MaskVertex { float x, y, z, u, v; };

@@ -4,22 +4,118 @@
 
 namespace Mus {
     class TBB_CoreMasking : public tbb::task_scheduler_observer {
+        struct AffinityFrame {
+            const TBB_CoreMasking* owner;
+            DWORD_PTR mask;
+            std::size_t depth = 1;
+        };
+        struct ThreadAffinity {
+            HANDLE thread;
+            DWORD_PTR original;
+            std::vector<AffinityFrame> frames;
+            ThreadAffinity(HANDLE handle, DWORD_PTR previous) : thread(handle), original(previous) {}
+            ~ThreadAffinity() { CloseHandle(thread); }
+            ThreadAffinity(const ThreadAffinity&) = delete;
+            ThreadAffinity& operator=(const ThreadAffinity&) = delete;
+        };
         DWORD_PTR mask;
+        // Arenas share TBB workers. A retiring outer arena must not restore over
+        // another arena's active mask or become that arena's later restore target.
+        struct AffinityRegistry {
+            std::mutex mutex;
+            std::unordered_map<DWORD, ThreadAffinity> threads;
+        };
+        static std::shared_ptr<AffinityRegistry> SharedRegistry() {
+            static auto registry = std::make_shared<AffinityRegistry>();
+            return registry;
+        }
+        // Keep registry storage alive even if its function-static owner is
+        // destroyed before the plugin's global thread-pool shared_ptrs.
+        std::shared_ptr<AffinityRegistry> affinityState;
+        static DWORD_PTR ActiveMask(const ThreadAffinity& state) {
+            for (auto it = state.frames.rbegin(); it != state.frames.rend(); ++it)
+                if (it->mask) return it->mask;
+            return state.original;
+        }
+        static void RestoreIfOwned(ThreadAffinity& state, DWORD_PTR previous) {
+            const auto target = ActiveMask(state);
+            if (target == previous) return;
+            GROUP_AFFINITY current{};
+            if (GetThreadGroupAffinity(state.thread, &current) && current.Mask == previous)
+                SetThreadAffinityMask(state.thread, target);
+        }
 
     public:
         TBB_CoreMasking(tbb::task_arena& arena, DWORD_PTR m)
-            : tbb::task_scheduler_observer(arena), mask(m) {
+            : tbb::task_scheduler_observer(arena), mask(m), affinityState(SharedRegistry()) {
             observe(true);
+        }
+        ~TBB_CoreMasking() override {
+            observe(false); // Drain callbacks before touching their shared state.
+            std::lock_guard lock(affinityState->mutex);
+            auto& savedAffinity = affinityState->threads;
+            for (auto it = savedAffinity.begin(); it != savedAffinity.end();) {
+                auto& state = it->second;
+                const auto previous = ActiveMask(state);
+                if (std::erase_if(state.frames, [this](const auto& frame) { return frame.owner == this; }))
+                    RestoreIfOwned(state, previous);
+                if (state.frames.empty()) it = savedAffinity.erase(it);
+                else ++it;
+            }
         }
 
         void on_scheduler_entry(bool worker) override {
-            if (worker) {
-                static thread_local bool pinned = false;
-                if (!pinned) {
-                    SetThreadAffinityMask(GetCurrentThread(), mask);
-                    pinned = true;
+            if (!worker) return;
+            HANDLE unownedHandle = nullptr;
+            try {
+                std::lock_guard lock(affinityState->mutex);
+                auto& savedAffinity = affinityState->threads;
+                const auto id = GetCurrentThreadId();
+                auto found = savedAffinity.find(id);
+                if (found != savedAffinity.end() && WaitForSingleObject(found->second.thread, 0) == WAIT_OBJECT_0) {
+                    savedAffinity.erase(found); // A terminated worker's ID was reused.
+                    found = savedAffinity.end();
                 }
+                if (found == savedAffinity.end()) {
+                    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                        &unownedHandle, THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION | SYNCHRONIZE, FALSE, 0)) return;
+                    GROUP_AFFINITY current{};
+                    if (!GetThreadGroupAffinity(unownedHandle, &current)) {
+                        CloseHandle(unownedHandle);
+                        return;
+                    }
+                    found = savedAffinity.try_emplace(id, unownedHandle, current.Mask).first;
+                    unownedHandle = nullptr;
+                }
+                auto& state = found->second;
+                if (!state.frames.empty() && state.frames.back().owner == this) {
+                    ++state.frames.back().depth;
+                    return;
+                }
+                // Allocate before changing affinity. A failed allocation leaves
+                // a different/no top owner, so its matching exit is a no-op.
+                state.frames.push_back({this, 0});
+                const auto previous = SetThreadAffinityMask(GetCurrentThread(), mask);
+                state.frames.back().mask = previous ? mask : 0;
+                if (previous && state.frames.size() == 1) state.original = previous;
+            } catch (...) {
+                if (unownedHandle) CloseHandle(unownedHandle);
             }
+        }
+        void on_scheduler_exit(bool worker) override {
+            if (!worker) return;
+            std::lock_guard lock(affinityState->mutex);
+            auto& savedAffinity = affinityState->threads;
+            const auto found = savedAffinity.find(GetCurrentThreadId());
+            if (found == savedAffinity.end()) return;
+            auto& state = found->second;
+            if (!state.frames.empty() && state.frames.back().owner == this) {
+                if (--state.frames.back().depth) return;
+                const auto previous = ActiveMask(state);
+                state.frames.pop_back();
+                RestoreIfOwned(state, previous);
+            }
+            if (state.frames.empty()) savedAffinity.erase(found);
         }
     };
 

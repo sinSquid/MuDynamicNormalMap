@@ -4,23 +4,6 @@
 namespace Mus {
     bool Config::LoadLogging()
     {
-        std::string configPath = GetRuntimeSKSEDirectory();
-        configPath += SKSE::PluginDeclaration::GetSingleton()->GetName().data();
-        configPath += ".ini";
-
-        std::ifstream file(configPath);
-
-        if (!file.is_open())
-        {
-            std::transform(configPath.begin(), configPath.end(), configPath.begin(), ::tolower);
-            file.open(configPath);
-        }
-
-        if (!file.is_open())
-        {
-            return false;
-        }
-
         RuntimeTuning values;
         std::string error;
         const auto folder = std::filesystem::path(GetRuntimeSKSEDirectory());
@@ -30,24 +13,6 @@ namespace Mus {
     }
 
     bool Config::LoadConfig() {
-        std::string configPath = GetRuntimeSKSEDirectory();
-        configPath += SKSE::PluginDeclaration::GetSingleton()->GetName().data();
-        configPath += ".ini";
-
-        std::ifstream file(configPath);
-
-        if (!file.is_open())
-        {
-			lowLetter(configPath);
-
-            file.open(configPath);
-            if (!file.is_open())
-            {
-                logger::critical("Unable to load Config file.");
-                return false;
-            }
-        }
-
         RuntimeTuning values;
         std::string error;
         const auto folder = std::filesystem::path(GetRuntimeSKSEDirectory());
@@ -105,14 +70,27 @@ namespace Mus {
                     bool isConditionState = false;
 
                     std::string line;
+                    bool firstLine = true;
                     while (std::getline(ifile, line))
                     {
+                        if (firstLine) {
+                            if (line.starts_with("\xef\xbb\xbf")) line.erase(0, 3);
+                            firstLine = false;
+                        }
                         skipComments(line);
                         trim(line);
                         if (line.length() > 0)
                         {
                             std::string variableName;
                             std::string variableValue = GetConfigSetting(line, variableName);
+                            if (line.front() == '[') {
+                                isConditionState = false;
+                                continue;
+                            }
+                            if (line.find('=') == std::string::npos) {
+                                if (isConditionState) condition.originalCondition += " " + line;
+                                continue;
+                            }
                             isConditionState = variableName == "Condition";
 
                             if (variableName == "Enable")
@@ -132,7 +110,8 @@ namespace Mus {
                             }
                             else if (variableName == "DetailStrength")
                             {
-                                condition.DetailStrength = GetFloatValue(variableValue);
+                                condition.DetailStrength = std::clamp(
+                                    GetFloatValue(variableValue, condition.DetailStrength), 0.0f, 1.0f);
                                 isNormalConditionFile = true;
                             }
                             else if (variableName == "ProxyDetailTextureFolder" || variableName == "ProxyTangentTextureFolder")
@@ -182,11 +161,6 @@ namespace Mus {
                                 condition.originalCondition = variableValue;
                                 isNormalConditionFile = true;
                             }
-                            else
-                            {
-                                if (isConditionState)
-                                    condition.originalCondition += " " + variableValue;
-                            }
                         }
                     }
                     if (isNormalConditionFile)
@@ -200,37 +174,40 @@ namespace Mus {
 
     SIMDType GetSIMDType(bool scan)
     {
-        static SIMDType SIMDType_ = SIMDType::noSIMD;
-        if (SIMDType_ != SIMDType::noSIMD && !scan)
-            return SIMDType_;
-
-        SIMDType_ = SIMDType::noSIMD;
+        static std::atomic<SIMDType> cached{SIMDType::noSIMD};
+        const auto previous = cached.load();
+        if (!scan && previous != SIMDType::noSIMD) return previous;
+        SIMDType selected = SIMDType::noSIMD;
         int info[4] = {};
         auto configSIMD = Config::GetSingleton().GetSIMDtype();
         if (configSIMD <= 0)
             configSIMD = SIMDType::avx2;
-        if (configSIMD >= SIMDType::avx2)
+        __cpuid(info, 1);
+        const bool sse4 = (info[2] & (1 << 19)) != 0;
+        const bool avx = (info[2] & (1 << 28)) && (info[2] & (1 << 27)) &&
+            (_xgetbv(0) & 6) == 6; // OS saves both XMM and YMM.
+        if (avx && configSIMD >= SIMDType::avx2)
         {
             __cpuid(info, 0);
             if (info[0] >= 7)
             {
                 __cpuidex(info, 7, 0);
                 if ((info[1] & (1 << 5)) != 0)
-                    SIMDType_ = SIMDType::avx2;
+                    selected = SIMDType::avx2;
             }
         }
-        if (SIMDType_ == SIMDType::noSIMD)
+        if (selected == SIMDType::noSIMD)
         {
-            __cpuid(info, 1);
-            if ((info[2] & (1 << 28)) != 0 && configSIMD >= SIMDType::avx)
-                SIMDType_ = SIMDType::avx;
-            else if ((info[2] & (1 << 19)) != 0 && configSIMD >= SIMDType::sse4)
-                SIMDType_ = SIMDType::sse4;
+            if (avx && configSIMD >= SIMDType::avx)
+                selected = SIMDType::avx;
+            else if (sse4 && configSIMD >= SIMDType::sse4)
+                selected = SIMDType::sse4;
             else
-                SIMDType_ = SIMDType::sse2;
+                selected = SIMDType::sse2;
         }
-        logger::info("Set SIMD type : {}", magic_enum::enum_name(SIMDType_).data());
-        return SIMDType_;
+        logger::info("Set SIMD type : {}", magic_enum::enum_name(selected).data());
+        cached.store(selected);
+        return selected;
     }
 
     void InitialSetting()

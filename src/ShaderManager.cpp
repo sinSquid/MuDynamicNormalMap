@@ -625,7 +625,7 @@ namespace Mus {
 				logger::critical("Failed to create NiTexture");
 				return nullptr;
 			}
-			else if (result == 0)
+			else if (result == 0 && output->rendererTexture)
 			{
 				auto oldTexture = output->rendererTexture->texture;
 				auto oldResource = output->rendererTexture->resourceView;
@@ -636,7 +636,7 @@ namespace Mus {
 				if (oldResource)
 					oldResource->Release();
 			}
-			else if (result == 1)
+			else
 			{
 				RE::BSGraphics::Texture* newRendererTexture = new RE::BSGraphics::Texture();
 				newRendererTexture->texture = reinterpret_cast<REX::W32::ID3D11Texture2D*>(texture2d.Detach());
@@ -809,7 +809,13 @@ namespace Mus {
 			}
 			else
 			{
-				ConvertTexture(ShaderManager::GetSingleton().GetDevice(), ShaderManager::GetSingleton().GetContext(), texture2D, newFormat, newWidth, newHeight, DirectX::TEX_FILTER_FLAGS::TEX_FILTER_FANT, cpuReadable, output);
+                if (!ConvertTexture(ShaderManager::GetSingleton().GetDevice(), ShaderManager::GetSingleton().GetContext(), texture2D, newFormat, newWidth, newHeight, DirectX::TEX_FILTER_FLAGS::TEX_FILTER_FANT, cpuReadable, output))
+                    return false;
+                output->GetDesc(&textureDesc);
+                srvDesc = {};
+                srvDesc.Format = textureDesc.Format;
+                srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                srvDesc.Texture2D.MipLevels = textureDesc.MipLevels;
 			}
 			if (!output)
 			{
@@ -845,9 +851,9 @@ namespace Mus {
 				return false;
 			if (!stringEndsWith(filePath, ".dds"))
 				return false;
+            filePath = stringRemoveStarts(filePath, "Data\\");
 			if (!stringStartsWith(filePath, "Textures"))
 				filePath = "Textures\\" + filePath;
-			filePath = stringRemoveStarts(filePath, "Data\\");
 
 			RE::BSResourceNiBinaryStream file(filePath);
             if (!file.good() || !file.stream)
@@ -885,7 +891,8 @@ namespace Mus {
 			}
 			else
 			{
-				ConvertTexture(device, context, texture2D, newFormat, newWidth, newHeight, DirectX::TEX_FILTER_FLAGS::TEX_FILTER_FANT, cpuReadable, output);
+                if (!ConvertTexture(device, context, texture2D, newFormat, newWidth, newHeight, DirectX::TEX_FILTER_FLAGS::TEX_FILTER_FANT, cpuReadable, output))
+                    return false;
 			}
 			if (!output)
 			{

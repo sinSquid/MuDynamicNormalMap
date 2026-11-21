@@ -88,6 +88,7 @@ namespace Mus {
 		void RunManageResource(bool isImminently);
 		bool RemoveNormalMap(RE::Actor* a_actor);
 	protected:
+        void ScheduleActorRefresh(RE::FormID id);
 		void onEvent(const FrameEvent& e) override;
         void onEvent(const QuitGameEvent& e) override;
 		void onEvent(const FacegenNiNodeEvent& e) override;

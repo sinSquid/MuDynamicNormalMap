@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <unordered_set>
 #include <vector>
@@ -47,10 +48,17 @@ namespace Mus {
     // Callbacks are detached under the lock and invoked by the caller without it.
     class FrameTaskQueue {
     public:
-        void Enqueue(std::int16_t delay, std::function<void()> callback) {
+        void Enqueue(std::int16_t delay, std::function<void()> callback,
+            std::optional<std::uint32_t> refreshActor = std::nullopt) {
             std::lock_guard lock(mutex);
             const auto ticks = delay > 0 ? static_cast<std::uint64_t>(delay) : 0;
-            pending[frame + ticks + 1].push_back(std::move(callback));
+            auto& batch = pending[frame + ticks + 1];
+            if (refreshActor && !batch.refreshActors.insert(*refreshActor).second) return;
+            try { batch.callbacks.push_back(std::move(callback)); }
+            catch (...) {
+                if (refreshActor) batch.refreshActors.erase(*refreshActor);
+                throw;
+            }
         }
 
         std::vector<std::function<void()>> TakeReady() {
@@ -60,10 +68,10 @@ namespace Mus {
             const auto end = pending.upper_bound(frame);
             std::size_t count = 0;
             for (auto it = pending.begin(); it != end; ++it)
-                count += it->second.size();
+                count += it->second.callbacks.size();
             ready.reserve(count);
             for (auto it = pending.begin(); it != end; ++it) {
-                auto& callbacks = it->second;
+                auto& callbacks = it->second.callbacks;
                 ready.insert(ready.end(), std::make_move_iterator(callbacks.begin()),
                     std::make_move_iterator(callbacks.end()));
             }
@@ -74,7 +82,11 @@ namespace Mus {
     private:
         std::mutex mutex;
         std::uint64_t frame = 0;
-        std::map<std::uint64_t, std::vector<std::function<void()>>> pending;
+        struct Batch {
+            std::vector<std::function<void()>> callbacks;
+            std::unordered_set<std::uint32_t> refreshActors;
+        };
+        std::map<std::uint64_t, Batch> pending;
     };
 
     class SingleFlightGate {

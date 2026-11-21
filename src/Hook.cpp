@@ -21,7 +21,7 @@ namespace Mus {
 	void __fastcall onFaceGen(RE::BSFaceGenNiNode* facegen, RE::NiNode* root, std::uint8_t unk4)
 	{
         onFaceGen_Orig(facegen, root, unk4);
-		FacegenNiNodeEvent e;
+		FacegenNiNodeEvent e{};
 		e.root = root;
 		e.facegenNiNode = facegen;
 		g_facegenNiNodeEventDispatcher.dispatch(e);
@@ -89,6 +89,7 @@ namespace Mus {
 		NullSubOrig();
 
 		auto main = RE::Main::GetSingleton();
+        if (!main) return;
 		if (main->GetRuntimeData().quitGame)
 		{
 			PNS::Shutdown();

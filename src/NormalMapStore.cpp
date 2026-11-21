@@ -63,6 +63,11 @@ namespace Mus {
 			return;
 		lastTickTime = currentTime;
 		WaitForMemoryCleanup();
+        {
+            // Skip empty caches without making the frame wait on a busy worker.
+            std::unique_lock cacheLock(lock, std::try_to_lock);
+            if (cacheLock.owns_lock() && map.empty()) return;
+        }
 		memoryCleanup = backGroundWorkerThreads->submitAsync([this] {
 			ClearMemory();
 		});

@@ -258,6 +258,13 @@ namespace Mus {
 		RunUpdateQueue();
 		RunManageResource(false);
 	}
+    void TaskManager::ScheduleActorRefresh(RE::FormID id) {
+        geometryRetry.Forget(id);
+        delayTasks.Enqueue(Config::GetSingleton().GetUpdateDelayTick(), [this, id] {
+            auto actor = GetFormByID<RE::Actor*>(id);
+            if (!IsInvalidActor(actor)) QUpdateNormalMap(actor, kAll);
+        }, id);
+    }
 	void TaskManager::onEvent(const FacegenNiNodeEvent& e)
 	{
 		if (!e.facegenNiNode)
@@ -266,36 +273,14 @@ namespace Mus {
 		if (!actor)
 			return;
 
-		RE::FormID id = actor->formID;
-        geometryRetry.Forget(id);
-		std::string name = actor->GetName();
-		RegisterDelayTask(Config::GetSingleton().GetUpdateDelayTick(), [this, id, name]() {
-			RE::Actor* actor = GetFormByID<RE::Actor*>(id);
-			if (IsInvalidActor(actor))
-			{
-				logger::error("{:x} {} : invalid reference. so skip", id, name);
-				return;
-			}
-			QUpdateNormalMap(actor, BipedObjectSlot::kAll);
-		});
+		ScheduleActorRefresh(actor->formID);
 	}
 	void TaskManager::onEvent(const ActorChangeHeadPartEvent& e)
 	{
 		if (!e.actor)
 			return;
 
-		RE::FormID id = e.actor->formID;
-        geometryRetry.Forget(id);
-		std::string name = e.actor->GetName();
-		RegisterDelayTask(Config::GetSingleton().GetUpdateDelayTick(), [this, id, name]() {
-			RE::Actor* actor = GetFormByID<RE::Actor*>(id);
-			if (IsInvalidActor(actor))
-			{
-				logger::error("{:x} {} : invalid reference. so skip", id, name);
-				return;
-			}
-            QUpdateNormalMap(actor, BipedObjectSlot::kAll);
-		});
+		ScheduleActorRefresh(e.actor->formID);
 	}
 	void TaskManager::onEvent(const ArmorAttachEvent& e)
 	{
@@ -304,18 +289,7 @@ namespace Mus {
 		if (!e.hasAttached)
 			return;
 
-		RE::FormID id = e.actor->formID;
-        geometryRetry.Forget(id);
-		std::string name = e.actor->GetName();
-		RegisterDelayTask(Config::GetSingleton().GetUpdateDelayTick(), [this, id, name, e]() {
-			RE::Actor* actor = GetFormByID<RE::Actor*>(id);
-			if (IsInvalidActor(actor))
-			{
-				logger::error("{:x} {} : invalid reference. so skip", id, name);
-				return;
-			}
-            QUpdateNormalMap(actor, kAll);
-		});
+		ScheduleActorRefresh(e.actor->formID);
 	}
 
 	void TaskManager::RunUpdateQueue()
@@ -334,7 +308,9 @@ namespace Mus {
 		auto camera = RE::PlayerCamera::GetSingleton();
 		if (!camera)
 			return;
-		auto cameraPosition = camera->GetRuntimeData2().pos;
+		const auto cameraPosition = camera->GetRuntimeData2().pos;
+        const auto tuning = Config::GetSingleton().GetRuntimeTuning();
+        const float rangeSquared = tuning->updateDistance * tuning->updateDistance;
 
         // Persistent ordered registries allow bounded maintenance without copying the
         // entire population or reinserting busy/cooling requests on every frame.
@@ -360,11 +336,12 @@ namespace Mus {
                 geometryRetry.Forget(id);
                 continue;
             }
-            const bool inRange = IsActorInRange(actor);
-            SetIsActiveActor(id, inRange);
+            const bool inRange = IsPlayer(id) || rangeSquared <= floatPrecision ||
+                cameraPosition.GetSquaredDistance(actor->loadedData->data3D->world.translate) <= rangeSquared;
+            if (inRange != wasActive) SetIsActiveActor(id, inRange);
             // Check independently of the old active bit: enabling VRAM saving must
             // also release maps of actors that were already outside the range.
-            if (!inRange && Config::GetSingleton().GetUpdateDistanceVramSave() &&
+            if (!inRange && tuning->UpdateDistanceVramSave &&
                 !GetIsUpdating(id) && (IsExistLastNormalMap(id) || PNS::HasInstalledLayer(id))) RemoveNormalMap(actor);
             if (inRange && !wasActive) QUpdateNormalMap(actor);
         }
@@ -577,10 +554,11 @@ namespace Mus {
 		logger::debug("{}::{:x}::{} : get geometry datas...", __func__, a_actor->formID, a_actor->GetName());
 		RE::FormID id = a_actor->formID;
 		std::string actorName = a_actor->GetName();
-		float detailStrength = condition.DetailStrength;
-        if (auto found = Papyrus::detailStrengthMap.find(id); found != Papyrus::detailStrengthMap.end())
-            detailStrength = found->second;
-		auto gender = GetSex(a_actor);
+		const float detailStrength = Papyrus::ReadDetailStrength(id, condition.DetailStrength);
+        const auto saveDetailTexturePath = GetDetailNormalMapPath(a_actor);
+        const auto saveOverlayTexturePath = GetOverlayNormalMapPath(a_actor);
+        const auto saveMaskTexturePath = GetMaskNormalMapPath(a_actor);
+        auto gender = GetSex(a_actor);
 		GeometryDataPtr newGeometryData = std::make_shared<GeometryData>();
 		UpdateSet newUpdateSet;
 		for (auto& pair : a_srcGeometies)
@@ -634,13 +612,10 @@ namespace Mus {
                 newSet.textureName = GetTextureName(a_actor, slot, texturePath);
                 newSet.srcTexturePath = texturePath;
 
-				std::string saveDetailTexturePath = GetDetailNormalMapPath(a_actor);
                 newSet.detailTexturePath = saveDetailTexturePath.empty() ? GetDetailNormalMapPath(texturePath, condition.ProxyDetailTextureFolder, condition.ProxyFirstScan) : saveDetailTexturePath;
 
-				std::string saveOverlayTexturePath = GetOverlayNormalMapPath(a_actor);
                 newSet.overlayTexturePath = saveOverlayTexturePath.empty() ? GetOverlayNormalMapPath(texturePath, condition.ProxyOverlayTextureFolder, condition.ProxyFirstScan) : saveOverlayTexturePath;
 
-				std::string saveMaskTexturePath = GetMaskNormalMapPath(a_actor);
                 newSet.maskTexturePath = saveMaskTexturePath.empty() ? GetMaskNormalMapPath(texturePath, condition.ProxyMaskTextureFolder, condition.ProxyFirstScan) : saveMaskTexturePath;
 
 				newSet.detailStrength = detailStrength;
@@ -757,6 +732,14 @@ namespace Mus {
                     return;
                 }
                 PNS::PruneInstalledLayers(a_actorID, liveShapes);
+                // Preserve the first matching result when a geometry appears twice.
+                using ResultIterator = decltype(textures.cbegin());
+                std::unordered_map<RE::BSGeometry*, ResultIterator> resultByGeometry;
+                if (textures.size() > 1) {
+                    resultByGeometry.reserve(textures.size());
+                    for (auto it = textures.cbegin(); it != textures.cend(); ++it)
+                        resultByGeometry.try_emplace(it->geometry, it);
+                }
                 // Serialize material installation and GPU composition with the renderer.
                 MaterialLock materialLock;
                 struct PreparedNormal {
@@ -796,9 +779,11 @@ namespace Mus {
                     }
                     else
                     {
-                        found = std::find_if(textures.begin(), textures.end(), [&](const ObjectNormalMapUpdater::NormalMapResult& normalmap) {
-                            return normalmap.geometry == geo;
-                        });
+                        if (textures.size() == 1) {
+                            if (textures.front().geometry == geo) found = textures.begin();
+                        } else if (auto it = resultByGeometry.find(geo); it != resultByGeometry.end()) {
+                            found = it->second;
+                        }
                     }
 
                     auto effect = geo->GetGeometryRuntimeData().shaderProperty.get();
@@ -1009,10 +994,7 @@ namespace Mus {
 	{
 		if (!a_actor)
 			return "";
-		auto found = Papyrus::normalmaps[Papyrus::normalmapTypes::detail].find(a_actor->formID);
-		if (found == Papyrus::normalmaps[Papyrus::normalmapTypes::detail].end())
-			return "";
-		return found->second;
+		return Papyrus::ReadNormalMap(a_actor->formID, Papyrus::normalmapTypes::detail);
 	}
 
 	std::string TaskManager::GetOverlayNormalMapPath(std::string a_normalMapPath)
@@ -1075,10 +1057,7 @@ namespace Mus {
 	{
 		if (!a_actor)
 			return "";
-		auto found = Papyrus::normalmaps[Papyrus::normalmapTypes::overlay].find(a_actor->formID);
-		if (found == Papyrus::normalmaps[Papyrus::normalmapTypes::overlay].end())
-			return "";
-		return found->second;
+		return Papyrus::ReadNormalMap(a_actor->formID, Papyrus::normalmapTypes::overlay);
 	}
 
 	std::string TaskManager::GetMaskNormalMapPath(std::string a_normalMapPath)
@@ -1141,10 +1120,7 @@ namespace Mus {
 	{
 		if (!a_actor)
 			return "";
-		auto found = Papyrus::normalmaps[Papyrus::normalmapTypes::mask].find(a_actor->formID);
-		if (found == Papyrus::normalmaps[Papyrus::normalmapTypes::mask].end())
-			return "";
-		return found->second;
+		return Papyrus::ReadNormalMap(a_actor->formID, Papyrus::normalmapTypes::mask);
 	}
 
 	std::string TaskManager::FixTexturePath(std::string texturePath)

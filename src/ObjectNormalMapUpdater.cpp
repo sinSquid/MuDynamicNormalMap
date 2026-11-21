@@ -1,4 +1,6 @@
 #include "ObjectNormalMapUpdater.h"
+#include "TextureRowSlices.h"
+#include "NormalMath.h"
 #include "SettingsCatalog.h"
 
 namespace Mus {
@@ -130,13 +132,22 @@ namespace Mus {
 
 	void ObjectNormalMapUpdater::LoadCacheResource(RE::FormID a_actorID, GeometryDataPtr a_data, UpdateSet& a_updateSet, MergedTextureGeometries& mergedTextureGeometries, ResourceDatas& resourceDatas, UpdateResult& results)
 	{
+        // Geometry storage stays fixed throughout this call. Retain the first
+        // duplicate identity, exactly as the previous find_if lookups did.
+        std::unordered_map<RE::BSGeometry*, GeometryData::GeometriesInfo*> geometryByIdentity;
+        geometryByIdentity.reserve(a_data->geometries.size());
+        for (auto& geometry : a_data->geometries)
+            geometryByIdentity.try_emplace(geometry.geometry, &geometry);
+        const auto findGeometry = [&](RE::BSGeometry* identity) -> GeometryData::GeometriesInfo* {
+            const auto found = geometryByIdentity.find(identity);
+            return found == geometryByIdentity.end() ? nullptr : found->second;
+        };
+
 		//hash update with geo hash + texture hash
         for (auto it = a_updateSet.begin(); it != a_updateSet.end();)
         {
-			const auto found = std::find_if(a_data->geometries.begin(), a_data->geometries.end(), [&](GeometryData::GeometriesInfo& geosInfo) {
-				return geosInfo.geometry == it->first;
-			});
-			if (found == a_data->geometries.end())
+			const auto found = findGeometry(it->first);
+			if (!found)
 			{
                 logger::error("{}::{:x} : Geometry {} not found in data", __func__, a_actorID, it->second.geometryName);
 				it = a_updateSet.erase(it);
@@ -147,26 +158,17 @@ namespace Mus {
 		}
 
 		//find texture from cache
-        std::sort(a_updateSet.begin(), a_updateSet.end(), [&](std::pair<RE::BSGeometry*, UpdateTextureSet>& a, std::pair<RE::BSGeometry*, UpdateTextureSet>& b) {
-			const auto aIt = std::find_if(a_data->geometries.begin(), a_data->geometries.end(), [&](GeometryData::GeometriesInfo& geosInfo) {
-				return geosInfo.geometry == a.first;
-			});
-			if (aIt == a_data->geometries.end())
-				return a.first < b.first;
-			const auto bIt = std::find_if(a_data->geometries.begin(), a_data->geometries.end(), [&](GeometryData::GeometriesInfo& geosInfo) {
-				return geosInfo.geometry == b.first;
-			});
-			if (bIt == a_data->geometries.end())
-				return a.first < b.first;
-			return aIt->objInfo.vertexCount() > bIt->objInfo.vertexCount();
-		});
+        std::sort(a_updateSet.begin(), a_updateSet.end(), [&](const auto& a, const auto& b) {
+            // Missing identities were removed above; equal counts stay equivalent.
+            return geometryByIdentity.at(a.first)->objInfo.vertexCount() >
+                geometryByIdentity.at(b.first)->objInfo.vertexCount();
+        });
         // Snapshot complete groups before cache hits erase entries from the update set.
         std::unordered_map<std::string, std::vector<std::uint64_t>> expectedComponents;
         for (const auto& update : a_updateSet)
         {
-            const auto geometry = std::find_if(a_data->geometries.begin(), a_data->geometries.end(),
-                [&](const auto& info) { return info.geometry == update.first; });
-            if (geometry != a_data->geometries.end())
+            const auto geometry = findGeometry(update.first);
+            if (geometry)
                 expectedComponents[update.second.textureName].push_back(geometry->hash);
         }
         for (auto& [name, hashes] : expectedComponents)
@@ -177,10 +179,8 @@ namespace Mus {
         std::unordered_set<std::string> cachedTextureNames;
         for (auto it = a_updateSet.begin(); it != a_updateSet.end();)
         {
-            const auto found = std::find_if(a_data->geometries.begin(), a_data->geometries.end(), [&](GeometryData::GeometriesInfo& geosInfo) {
-                return geosInfo.geometry == it->first;
-            });
-            if (found == a_data->geometries.end())
+            const auto found = findGeometry(it->first);
+            if (!found)
             {
                 logger::error("{}::{:x} : Geometry {} not found in data", __func__, a_actorID, it->second.geometryName);
                 it++;
@@ -276,10 +276,8 @@ namespace Mus {
 		//share resource if textureName is the same
         for (auto it = a_updateSet.begin(); it != a_updateSet.end();)
         {
-			const auto found = std::find_if(a_data->geometries.begin(), a_data->geometries.end(), [&](GeometryData::GeometriesInfo& geosInfo) {
-                return geosInfo.geometry == it->first;
-			});
-			if (found == a_data->geometries.end())
+			const auto found = findGeometry(it->first);
+			if (!found)
 			{
                 it++;
 				continue;
@@ -636,7 +634,7 @@ namespace Mus {
 
                             for (std::int32_t y = minY; y < maxY; y++)
                             {
-                                const std::uint32_t wrapY = static_cast<std::uint32_t>(y) & (height - 1);
+                                const std::uint32_t wrapY = WrapTextureCoordinate(y, height);
                                 const float mY = static_cast<const float>(wrapY) * invHeight;
 
                                 std::uint8_t* srcRowData = nullptr;
@@ -674,7 +672,7 @@ namespace Mus {
                                     if (!ComputeBarycentric(static_cast<const float>(x) + 0.5f, static_cast<const float>(y) + 0.5f, p0, p1, p2, bary))
                                         continue;
 
-                                    const std::uint32_t wrapX = static_cast<std::uint32_t>(x) & (width - 1);
+                                    const std::uint32_t wrapX = WrapTextureCoordinate(x, width);
                                     const float mX = static_cast<const float>(wrapX) * invWidth;
 
                                     RGBA dstColor;
@@ -707,7 +705,7 @@ namespace Mus {
 
                                             const float denomal = (bary.x + bary.y + floatPrecision);
                                             const DirectX::XMVECTOR n01 = SlerpVector(n0v, n1v, bary.y / denomal);
-                                            const DirectX::XMVECTOR n = SlerpVector(n01, n2v, bary.z);
+                                            const DirectX::XMVECTOR n = NormalizeOr(SlerpVector(n01, n2v, bary.z), DirectX::XMVectorSet(0, 0, 1, 0));
 
                                             DirectX::XMVECTOR normalResult = emptyVector;
                                             if (detailColor.a > 0.0f)
@@ -718,11 +716,8 @@ namespace Mus {
                                                 const DirectX::XMVECTOR b01 = SlerpVector(b0v, b1v, bary.y / denomal);
                                                 const DirectX::XMVECTOR b = SlerpVector(b01, b2v, bary.z);
 
-                                                const DirectX::XMVECTOR ft = DirectX::XMVector3NormalizeEst(
-                                                    DirectX::XMVectorSubtract(t, DirectX::XMVectorScale(n, DirectX::XMVectorGetX(DirectX::XMVector3Dot(n, t)))));
-                                                const DirectX::XMVECTOR fb = DirectX::XMVector3NormalizeEst(DirectX::XMVector3Cross(n, ft));
-
-                                                const DirectX::XMMATRIX tbn = DirectX::XMMATRIX(ft, fb, n, DirectX::XMVectorSet(0, 0, 0, 1));
+                                                const auto basis = BuildNormalTangents(n, t, b);
+                                                const DirectX::XMMATRIX tbn = DirectX::XMMATRIX(basis.tangent, basis.bitangent, n, DirectX::XMVectorSet(0, 0, 0, 1));
 
                                                 const DirectX::XMFLOAT4 detailColorF(
                                                     detailColor.r * 2.0f - 1.0f,
@@ -735,10 +730,10 @@ namespace Mus {
                                                     tangentZCorrection ? std::sqrt(std::max(0.0f, 1.0f - detailColorF.x * detailColorF.x - detailColorF.y * detailColorF.y)) : detailColorF.z,
                                                     0.0f);
 
-                                                const DirectX::XMVECTOR detailNormal = DirectX::XMVector3NormalizeEst(
-                                                    DirectX::XMVector3TransformNormal(detailNormalVec, tbn));
-                                                normalResult = DirectX::XMVector3NormalizeEst(
-                                                    DirectX::XMVectorLerp(n, detailNormal, detailColor.a));
+                                                const DirectX::XMVECTOR detailNormal = NormalizeOr(
+                                                    DirectX::XMVector3TransformNormal(detailNormalVec, tbn), n);
+                                                normalResult = NormalizeOr(
+                                                    DirectX::XMVectorLerp(n, detailNormal, detailColor.a), n);
                                             }
                                             else
                                             {
@@ -1186,19 +1181,9 @@ namespace Mus {
 	}
 
 	DirectX::XMVECTOR ObjectNormalMapUpdater::SlerpVector(const DirectX::XMVECTOR& a, const DirectX::XMVECTOR& b, const float& t)
-	{
-		const float dotAB = std::clamp(DirectX::XMVectorGetX(DirectX::XMVector3Dot(a, b)), -1.0f, 1.0f);
-		const float theta = acosf(dotAB) * t;
-		const DirectX::XMVECTOR relVec = DirectX::XMVector3NormalizeEst(
-			DirectX::XMVectorSubtract(b, DirectX::XMVectorScale(a, dotAB))
-		);
-		return DirectX::XMVector3NormalizeEst(
-			DirectX::XMVectorAdd(
-				DirectX::XMVectorScale(a, cosf(theta)),
-				DirectX::XMVectorScale(relVec, sinf(theta))
-			)
-		);
-	}
+    {
+        return SlerpUnitVector(a, b, t);
+    }
 
 	bool ObjectNormalMapUpdater::ComputeBarycentric(const float& px, const float& py, const DirectX::XMINT2& a, const DirectX::XMINT2& b, const DirectX::XMINT2& c, DirectX::XMFLOAT3& out)
 	{
@@ -1293,6 +1278,7 @@ namespace Mus {
 		D3D11_TEXTURE2D_DESC dstDesc, srcDesc;
 		dstTexture->GetDesc(&dstDesc);
 		srcTexture->GetDesc(&srcDesc);
+        if (dstMipMapLevel >= dstDesc.MipLevels || srcMipMapLevel >= srcDesc.MipLevels) return false;
 
 		const UINT srcWidth = std::max(srcDesc.Width >> srcMipMapLevel, 1u);
 		const UINT srcHeight = std::max(srcDesc.Height >> srcMipMapLevel, 1u);
@@ -1314,15 +1300,15 @@ namespace Mus {
 		const std::uint32_t subY = std::min(dstHeight, 
 											   std::max(1u, dstWidth / subResolution) 
 											   * std::max(1u, dstHeight / subResolution));
-		const UINT unitY = (dstHeight + subY - 1) / subY;
+        const auto slices = MakeTextureRowSlices(dstHeight, subY, DirectX::IsCompressed(dstDesc.Format) ? 4u : 1u);
 		std::vector<std::future<void>> gpuTasks;
-		for (std::uint32_t sy = 0; sy < subY; sy++)
+		for (std::uint32_t sy = 0; sy < slices.size(); sy++)
 		{
 			D3D11_BOX box = {};
 			box.left = 0;
 			box.right = dstWidth;
-			box.top = sy * unitY;
-			box.bottom = std::min(dstHeight, box.top + unitY);
+			box.top = slices[sy].top;
+			box.bottom = slices[sy].bottom;
 			box.front = 0;
 			box.back = 1;
 
@@ -1375,10 +1361,15 @@ namespace Mus {
 
 		D3D11_TEXTURE2D_DESC desc;
 		dstTexture->GetDesc(&desc);
+        if (mipLevel >= desc.MipLevels) return false;
 
 		Shader::ShaderLocker sl(context);
 		const UINT width = std::max(1u, desc.Width >> mipLevel);
 		const UINT height = std::max(1u, desc.Height >> mipLevel);
+        std::size_t minRowPitch = 0, minSlicePitch = 0;
+        if (FAILED(DirectX::ComputePitch(desc.Format, width, height, minRowPitch, minSlicePitch)) ||
+            rowPitch < minRowPitch || buffer.size() < static_cast<std::uint64_t>(rowPitch) * DirectX::ComputeScanlines(desc.Format, height))
+            return false;
 
 		if (sl.IsSecondGPU() || isNoSplitGPU || (width <= 256 && height <= 256))
 		{
@@ -1401,44 +1392,22 @@ namespace Mus {
 		const std::uint32_t subY = std::min(height,
 											   std::max(1u, width / subResolution) 
 											   * std::max(1u, height / subResolution));
-		const UINT unitY = (height + subY - 1) / subY;
-
-		UINT blockWidth = 1;
-		UINT blockHeight = 1;
-		UINT blockSize = 4;
-		if (desc.Format == DXGI_FORMAT_BC7_UNORM || desc.Format == DXGI_FORMAT_BC3_UNORM || desc.Format == DXGI_FORMAT_BC1_UNORM)
-		{
-			blockWidth = 4;
-			blockHeight = 4;
-			blockSize = 16;
-		}
-		else if (desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
-		{
-			blockWidth = 1;
-			blockHeight = 1;
-			blockSize = 4;
-		}
-		else
-		{
-			blockWidth = 1;
-			blockHeight = 1;
-			blockSize = 4;
-		}
+        const UINT blockHeight = DirectX::IsCompressed(desc.Format) ? 4u : 1u;
+        const auto slices = MakeTextureRowSlices(height, subY, blockHeight);
 
 		std::vector<std::future<void>> gpuTasks;
-		for (std::uint32_t sy = 0; sy < subY; sy++)
+		for (std::uint32_t sy = 0; sy < slices.size(); sy++)
 		{
 			D3D11_BOX box = {};
 			box.left = 0;
 			box.right = width;
-			box.top = sy * unitY;
-			box.bottom = std::min(height, box.top + unitY);
+			box.top = slices[sy].top;
+			box.bottom = slices[sy].bottom;
 			box.front = 0;
 			box.back = 1;
 
-			const UINT blockX = box.left / blockWidth;
 			const UINT blockY = box.top / blockHeight;
-			const std::uint8_t* bufferStart = buffer.data() + (blockY * rowPitch) + (blockX * blockSize);
+			const std::uint8_t* bufferStart = buffer.data() + static_cast<std::size_t>(blockY) * rowPitch;
 
 			gpuTasks.push_back(gpuTask->submitAsync([&, mipLevel, box, bufferStart, sy]() {
 				if (Config::GetSingleton().GetTextureCopyTime())

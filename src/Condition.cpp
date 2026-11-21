@@ -1,4 +1,5 @@
 #include "Condition.h"
+#include "ConditionSyntax.h"
 
 namespace Mus {
 	void ConditionManager::InitialConditionMap()
@@ -61,7 +62,7 @@ namespace Mus {
 
 	const ConditionManager::Condition ConditionManager::ParseConditions(Condition condition)
 	{
-		std::vector<std::string> splittedANDs = split(condition.originalCondition, "AND");
+		std::vector<std::string> splittedANDs = SplitTopLevelConditions(condition.originalCondition, "AND");
 
 		bool firstAND = true;
 		for (auto& strAnd : splittedANDs)
@@ -69,7 +70,7 @@ namespace Mus {
 			if (!firstAND)
 				logger::debug("AND ...");
 			firstAND = false;
-			std::vector<std::string> splittedORs = split(strAnd, "OR");
+			std::vector<std::string> splittedORs = SplitTopLevelConditions(strAnd, "OR");
 			ConditionItemOr conditionOr;
 
 			bool firstOR = true;

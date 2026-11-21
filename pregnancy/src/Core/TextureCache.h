@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 
 namespace PNS {
 
@@ -63,6 +64,10 @@ namespace PNS {
         int maxWeightIndex = 0;
         int maxPartition = 0;
         int maxSBMLevel = 0;
+        // Unsuffixed male/female packs can have different bins/stages; SBM
+        // variants must not inflate the ordinary static-mode selection range.
+        std::array<int, 2> weightCounts{}; // male, female
+        std::array<int, 2> partitionCounts{};
         bool hasFemale = false;
         bool hasMale = false;
     };

@@ -41,17 +41,22 @@ namespace Mus {
 			m_cacheDirt = true;
 		};
         void dispatch(const Event& event) override {
-            if (m_cacheDirt) {
+            for (;;) {
+                // Check dirty while holding the same lock that protects listener
+                // lifetime. A removal between an unlocked check and this lock
+                // would otherwise leave a retired pointer in the dispatch cache.
+                std::shared_lock sl(m_lock);
+                if (!m_cacheDirt) {
+                    for (auto i : m_caches) i->onEvent(event);
+                    return;
+                }
+                sl.unlock();
                 std::lock_guard lg(m_lock);
-                m_caches.clear();
-                for (auto& i : m_listeners)
-                    m_caches.emplace_back(i);
-                m_cacheDirt = false;
+                if (m_cacheDirt) {
+                    m_caches.assign(m_listeners.begin(), m_listeners.end());
+                    m_cacheDirt = false;
+                }
             }
-
-            std::shared_lock sl(m_lock);
-            for (auto i : m_caches)
-                i->onEvent(event);
         };
 
 	private:

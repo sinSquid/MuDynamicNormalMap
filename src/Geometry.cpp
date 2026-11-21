@@ -3,6 +3,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "tiny_gltf.h"
 #include "Geometry.h"
+#include "GeometryContentHash.h"
 
 namespace Mus {
     GeometryData::GeometryData(RE::BSGeometry* a_geo) : tp(currentProcessingThreads.load())
@@ -66,12 +67,17 @@ namespace Mus {
 			return false;
 
 		newObjInfo.info.vertexCount = newObjInfo.info.vertexCount > 0 ? newObjInfo.info.vertexCount : skinPartition->vertexCount;
+        if (!newObjInfo.info.vertexCount || !newObjInfo.info.hasVertices || !newObjInfo.info.hasUVs ||
+            !newObjInfo.info.desc.GetSize() ||
+            !skinPartition->numPartitions || !skinPartition->partitions.data() ||
+            !skinPartition->partitions[0].buffData || !skinPartition->partitions[0].buffData->rawVertexData)
+            return false;
 		if (dynamicTriShape)
 		{
 			if (Config::GetSingleton().GetRealtimeDetectHead() < 2)
 			{
 				const auto morphData = GetMorphExtraData(a_geo);
-				if (morphData)
+				if (morphData && morphData->vertexData && morphData->modelVertexCount >= newObjInfo.info.vertexCount)
 				{
 					newObjInfo.dynamicBlockData1.resize(newObjInfo.info.vertexCount);
 					std::memcpy(newObjInfo.dynamicBlockData1.data(), morphData->vertexData, sizeof(RE::NiPoint3) * newObjInfo.info.vertexCount);
@@ -92,9 +98,13 @@ namespace Mus {
 		for (auto& partition : skinPartition->partitions)
 		{
 			const std::size_t indicesCount = (std::size_t)partition.triangles * 3;
-			std::vector<std::uint16_t> indicesBlockData_(indicesCount);
-			std::memcpy(indicesBlockData_.data(), partition.triList, sizeof(std::uint16_t) * indicesCount);
-			newObjInfo.indicesBlockData.insert(newObjInfo.indicesBlockData.end(), indicesBlockData_.begin(), indicesBlockData_.end());
+            if (indicesCount && !partition.triList) return false;
+            newObjInfo.indicesBlockData.reserve(newObjInfo.indicesBlockData.size() + indicesCount);
+            for (std::size_t index = 0; index < indicesCount; ++index) {
+                const auto vertex = partition.triList[index];
+                if (vertex >= newObjInfo.info.vertexCount) return false;
+                newObjInfo.indicesBlockData.push_back(vertex);
+            }
 		}
 		geometries.push_back(GeometriesInfo{ a_geo, newObjInfo });
 
@@ -405,7 +415,7 @@ namespace Mus {
                             const DirectX::XMFLOAT2& uv2 = uvs[i2];
 
                             // Normal
-                            const DirectX::XMVECTOR normalVec = DirectX::XMVector4NormalizeEst(
+                            const DirectX::XMVECTOR normalVec = DirectX::XMVector3Normalize(
                                 DirectX::XMVector3Cross(
                                     DirectX::XMVectorSubtract(v1, v0),
                                     DirectX::XMVectorSubtract(v2, v0)));
@@ -455,7 +465,7 @@ namespace Mus {
 
 	void GeometryData::RecalculateNormals(float a_smoothDegree)
 	{
-        if (vertices.empty() || indices.empty() || vertexToFaceMap.empty() || a_smoothDegree < floatPrecision)
+        if (vertices.empty() || indices.empty() || vertexToFaceMap.empty())
 			return;
 
 		mainInfo.hasNormals = true;
@@ -484,6 +494,7 @@ namespace Mus {
 
 		const float smoothCos = std::cosf(DirectX::XMConvertToRadians(a_smoothDegree));
         const bool allowInvertNormalSmooth = Config::GetSingleton().GetAllowInvertNormalSmooth();
+        const bool smoothAcrossWelds = a_smoothDegree >= floatPrecision;
 
         tp->Execute([&] {
             tbb::parallel_for(
@@ -509,6 +520,7 @@ namespace Mus {
 
                         for (const auto& link : weldedVertices[i])
                         {
+                            if (!smoothAcrossWelds && link != i) continue;
                             for (const auto& fi : vertexToFaceMap[link])
                             {
                                 const auto& fn = faceNormals[fi];
@@ -522,7 +534,7 @@ namespace Mus {
                                         fnVec = DirectX::XMVectorNegate(fnVec);
                                     }
                                 }
-                                if (dot < smoothCos)
+                                if (smoothAcrossWelds && dot < smoothCos)
                                     continue;
                                 const auto& ft = faceTangents[fi];
                                 nSum = DirectX::XMVectorAdd(nSum, fnVec);
@@ -540,8 +552,10 @@ namespace Mus {
 
                         if (!DirectX::XMVector3Equal(t, emptyVector))
                         {
-                            t = DirectX::XMVector3NormalizeEst(DirectX::XMVectorSubtract(t, DirectX::XMVectorScale(n, DirectX::XMVectorGetX(DirectX::XMVector3Dot(n, t)))));
-                            b = DirectX::XMVector3NormalizeEst(DirectX::XMVector3Cross(n, t));
+                            t = DirectX::XMVector3Normalize(DirectX::XMVectorSubtract(t, DirectX::XMVectorScale(n, DirectX::XMVectorGetX(DirectX::XMVector3Dot(n, t)))));
+                            const auto crossNT = DirectX::XMVector3Cross(n, t);
+                            const float handedness = DirectX::XMVectorGetX(DirectX::XMVector3Dot(crossNT, bSum)) < 0.0f ? -1.0f : 1.0f;
+                            b = DirectX::XMVectorScale(DirectX::XMVector3Normalize(crossNT), handedness);
                         }
 
                         if (!DirectX::XMVector3Equal(t, emptyVector))
@@ -1061,17 +1075,24 @@ namespace Mus {
 
 	void GeometryData::CreateGeometryHash(float a_precision)
     {
-        const DirectX::XMVECTOR p = DirectX::XMVectorReplicate(a_precision);
-        std::vector<DirectX::XMINT3> hashNormals;
-        for (auto& geo : geometries)
-        {
-            hashNormals.resize(geo.objInfo.normalCount());
-            for (std::size_t i = geo.objInfo.normalStart, hi = 0; i < geo.objInfo.normalEnd; i++, hi++)
-            {
-                const DirectX::XMVECTOR v = DirectX::XMVectorFloor(DirectX::XMVectorMultiply(DirectX::XMLoadFloat3(&normals[i]), p));
-                DirectX::XMStoreSInt3(&hashNormals[hi], v);
+        const DirectX::XMVECTOR precision = DirectX::XMVectorReplicate(a_precision);
+        std::vector<DirectX::XMINT3> hashNormals, hashTangents, hashBitangents;
+        const auto quantize = [&](const auto& source, std::uint32_t begin, std::uint32_t end, auto& output) {
+            output.resize(end - begin);
+            for (std::size_t i = begin; i < end; ++i) {
+                const auto value = DirectX::XMVectorFloor(DirectX::XMVectorMultiply(DirectX::XMLoadFloat3(&source[i]), precision));
+                DirectX::XMStoreSInt3(&output[i - begin], value);
             }
-            geo.hash = XXH3_64bits(hashNormals.data(), hashNormals.size() * sizeof(DirectX::XMINT3));
+        };
+        for (auto& geo : geometries) {
+            const auto& info = geo.objInfo;
+            quantize(normals, info.normalStart, info.normalEnd, hashNormals);
+            quantize(tangents, info.tangentStart, info.tangentEnd, hashTangents);
+            quantize(bitangents, info.bitangentStart, info.bitangentEnd, hashBitangents);
+            geo.hash = GeometryContentHash(std::as_bytes(std::span(hashNormals)),
+                std::as_bytes(std::span(uvs).subspan(info.uvStart, info.uvCount())),
+                std::as_bytes(std::span(hashTangents)), std::as_bytes(std::span(hashBitangents)),
+                std::span(indices).subspan(info.indicesStart, info.indicesCount()), info.vertexStart);
         }
     }
 
