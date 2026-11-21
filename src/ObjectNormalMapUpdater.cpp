@@ -130,7 +130,7 @@ namespace Mus {
 		return true;
 	}
 
-	void ObjectNormalMapUpdater::LoadCacheResource(RE::FormID a_actorID, GeometryDataPtr a_data, UpdateSet& a_updateSet, MergedTextureGeometries& mergedTextureGeometries, ResourceDatas& resourceDatas, UpdateResult& results)
+	void ObjectNormalMapUpdater::LoadCacheResource(RE::FormID a_actorID, GeometryDataPtr a_data, UpdateSet& a_updateSet, MergedTextureGeometries& mergedTextureGeometries, ResourceDatas& resourceDatas, UpdateResult& results, const std::string& generationSignature)
 	{
         // Geometry storage stays fixed throughout this call. Retain the first
         // duplicate identity, exactly as the previous find_if lookups did.
@@ -153,7 +153,7 @@ namespace Mus {
 				it = a_updateSet.erase(it);
 				continue;
 			}
-            found->hash = GetHash(it->second, found->hash);
+            found->hash = GetHash(it->second, found->hash, generationSignature);
             it++;
 		}
 
@@ -376,14 +376,14 @@ namespace Mus {
         return newGeometryResourceData;
 	}
 
-	std::uint64_t ObjectNormalMapUpdater::GetHash(UpdateTextureSet updateSet, std::uint64_t geoHash)
+	std::uint64_t ObjectNormalMapUpdater::GetHash(const UpdateTextureSet& updateSet, std::uint64_t geoHash, const std::string& generationSignature)
 	{
-		return std::hash<std::string>()(RuntimeGenerationSignature(*Config::GetSingleton().GetRuntimeTuning()) + "|" + std::to_string(updateSet.slot) + "|"
+		return std::hash<std::string>()(generationSignature + "|" + std::to_string(updateSet.slot) + "|"
 										+ updateSet.srcTexturePath + "|"
 										+ updateSet.detailTexturePath + "|"
 										+ updateSet.overlayTexturePath + "|"
 										+ updateSet.maskTexturePath + "|"
-										+ std::to_string(updateSet.detailStrength) + "|"
+										+ FloatValueText(updateSet.detailStrength) + "|"
 										+ std::to_string(geoHash));
 	}
 
@@ -409,7 +409,11 @@ namespace Mus {
 
 		MergedTextureGeometries mergedTextureGeometries;
         ResourceDatas resourceDatas;
-		LoadCacheResource(a_actorID, a_data, a_updateSet, mergedTextureGeometries, resourceDatas, results);
+        const auto tuning = Config::GetSingleton().GetRuntimeTuning();
+        const auto compression = SelectTextureCompression(tuning->TextureCompress, tuning->TextureCompressQuality,
+            sl.IsSecondGPU(), isImmediately.load());
+        const auto generationSignature = RuntimeGenerationSignature(*tuning, false, compression);
+		LoadCacheResource(a_actorID, a_data, a_updateSet, mergedTextureGeometries, resourceDatas, results, generationSignature);
 
         const bool tangentZCorrection = Config::GetSingleton().GetTangentZCorrection();
 
@@ -784,7 +788,7 @@ namespace Mus {
             results.push_back(newNormalMapResult);
             resourceDatas.push_back(newResourceData);
         }
-		PostProcessing(device, context, resourceDatas, results, mergedTextureGeometries);
+		PostProcessing(device, context, resourceDatas, results, mergedTextureGeometries, compression);
 		return results;
 	}
 
@@ -818,7 +822,11 @@ namespace Mus {
 
 		MergedTextureGeometries mergedTextureGeometries;
         ResourceDatas resourceDatas;
-		LoadCacheResource(a_actorID, a_data, a_updateSet, mergedTextureGeometries, resourceDatas, results);
+        const auto tuning = Config::GetSingleton().GetRuntimeTuning();
+        const auto compression = SelectTextureCompression(tuning->TextureCompress, tuning->TextureCompressQuality,
+            sl.IsSecondGPU(), isImmediately.load());
+        const auto generationSignature = RuntimeGenerationSignature(*tuning, true, compression);
+		LoadCacheResource(a_actorID, a_data, a_updateSet, mergedTextureGeometries, resourceDatas, results, generationSignature);
 
         // Cached normal maps need no geometry uploads. CPU processing above remains
         // unchanged because it supplies the geometry hashes used by cache lookup.
@@ -1089,7 +1097,7 @@ namespace Mus {
             results.push_back(newNormalMapResult);
             resourceDatas.push_back(newResourceData);
         }
-		PostProcessingGPU(device, context, resourceDatas, results, mergedTextureGeometries);
+		PostProcessingGPU(device, context, resourceDatas, results, mergedTextureGeometries, compression);
 		return results;
 	}
 
@@ -1452,15 +1460,17 @@ namespace Mus {
 		return true;
 	}
 
-	void ObjectNormalMapUpdater::PostProcessing(ID3D11Device *device, ID3D11DeviceContext *context, ResourceDatas &resourceDatas, UpdateResult &results, MergedTextureGeometries &mergedTextureGeometries)
+	void ObjectNormalMapUpdater::PostProcessing(ID3D11Device *device, ID3D11DeviceContext *context, ResourceDatas &resourceDatas, UpdateResult &results, MergedTextureGeometries &mergedTextureGeometries, const TextureCompressionPlan& compression)
 	{
         std::unordered_set<RE::BSGeometry*> failedCopyResources;
+        std::unordered_set<const TextureResource*> compressionFallbacks;
         const auto rejectTexture = [&](const NormalMapResult& failed) {
             for (const auto& candidate : results)
                 if (candidate.texture == failed.texture)
                     failedCopyResources.insert(candidate.geometry);
         };
         const auto publishResource = [&](const NormalMapResult& result) {
+            if (compressionFallbacks.contains(result.texture.get())) return;
             // This immutable certificate belongs to this exact completed image.
             auto& hashes = result.texture->componentHashes;
             hashes.clear();
@@ -1550,7 +1560,10 @@ namespace Mus {
                 continue;
             if (mergedTextureGeometries.find(result.geometry) != mergedTextureGeometries.end())
                 continue;
-            CompressTexture(device, context, resourceData, result.texture->normalmapTexture2D);
+            if (!CompressTexture(device, context, resourceData, result.texture->normalmapTexture2D, compression)) {
+                if (!result.texture->normalmapTexture2D) rejectTexture(result);
+                else compressionFallbacks.insert(result.texture.get());
+            }
         }
         for (std::uint32_t i = 0; i < results.size(); i++)
         {
@@ -1625,15 +1638,17 @@ namespace Mus {
             return failedCopyResources.find(result.geometry) != failedCopyResources.end();
         });
 	}
-    void ObjectNormalMapUpdater::PostProcessingGPU(ID3D11Device* device, ID3D11DeviceContext* context, ResourceDatas& resourceDatas, UpdateResult& results, MergedTextureGeometries& mergedTextureGeometries)
+    void ObjectNormalMapUpdater::PostProcessingGPU(ID3D11Device* device, ID3D11DeviceContext* context, ResourceDatas& resourceDatas, UpdateResult& results, MergedTextureGeometries& mergedTextureGeometries, const TextureCompressionPlan& compression)
     {
         std::unordered_set<RE::BSGeometry*> failedCopyResources;
+        std::unordered_set<const TextureResource*> compressionFallbacks;
         const auto rejectTexture = [&](const NormalMapResult& failed) {
             for (const auto& candidate : results)
                 if (candidate.texture == failed.texture)
                     failedCopyResources.insert(candidate.geometry);
         };
         const auto publishResource = [&](const NormalMapResult& result) {
+            if (compressionFallbacks.contains(result.texture.get())) return;
             // This immutable certificate belongs to this exact completed image.
             auto& hashes = result.texture->componentHashes;
             hashes.clear();
@@ -1725,7 +1740,10 @@ namespace Mus {
                 continue;
             if (mergedTextureGeometries.find(result.geometry) != mergedTextureGeometries.end())
                 continue;
-            CompressTexture(device, context, resourceData, result.texture->normalmapTexture2D);
+            if (!CompressTexture(device, context, resourceData, result.texture->normalmapTexture2D, compression)) {
+                if (!result.texture->normalmapTexture2D) rejectTexture(result);
+                else compressionFallbacks.insert(result.texture.get());
+            }
         }
         for (std::uint32_t i = 0; i < results.size(); i++)
         {
@@ -2499,21 +2517,14 @@ namespace Mus {
 		return true;
 	}
 
-	bool ObjectNormalMapUpdater::CompressTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut)
+	bool ObjectNormalMapUpdater::CompressTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut, const TextureCompressionPlan& compression)
 	{
-		if (Config::GetSingleton().GetTextureCompress() == 0 || !device || !context || !texInOut)
+		if (!device || !context || !texInOut)
 			return false;
+        if (compression.backend == TextureCompressionBackend::None) return true;
 
 		const bool isSecondGPU = Shader::ShaderManager::GetSingleton().IsSecondGPUResource(context);
-		bool isGPUCompress = false;
-		if (Config::GetSingleton().GetTextureCompress() == -1)
-		{
-			isGPUCompress = isSecondGPU || isImmediately;
-		}
-		else
-		{
-			isGPUCompress = Config::GetSingleton().GetTextureCompress() == 2;
-		}
+        const bool isGPUCompress = compression.backend == TextureCompressionBackend::GPU;
 
 		logger::info("{}::{} : Compress texture with {}...", __func__, resourceData->textureName, isGPUCompress ? "GPU" : "CPU");
 
@@ -2529,11 +2540,11 @@ namespace Mus {
 				PerformanceLog(std::string(__func__) + "::" + resourceData->textureName, false, false);
 
 			std::uint8_t quality = 0;
-			if (Config::GetSingleton().GetTextureCompressQuality() < 3)
+			if (compression.quality < 3)
 			{
 				quality = 0;
 			}
-			else if (Config::GetSingleton().GetTextureCompressQuality() < 6)
+			else if (compression.quality < 6)
 			{
 				quality = 1;
 			}
@@ -2548,7 +2559,7 @@ namespace Mus {
 		}
 		else
 		{
-			isCompressed = CompressTextureBC7(device, context, resourceData, texInOut);
+			isCompressed = CompressTextureBC7(device, context, resourceData, texInOut, compression.quality);
 		}
 
 		if (!isCompressed || !texInOut)
@@ -2557,7 +2568,7 @@ namespace Mus {
 		logger::debug("{}::{} : Compress texture done", __func__, resourceData->textureName);
 		return isCompressed;
 	}
-	bool ObjectNormalMapUpdater::CompressTextureBC7(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut)
+	bool ObjectNormalMapUpdater::CompressTextureBC7(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut, int quality)
 	{
 		if (!device || !context || !texInOut)
 			return false;
@@ -2610,7 +2621,7 @@ namespace Mus {
 
 		ispc::bc7e_sse2_compress_block_params params;
 		
-		switch (Config::GetSingleton().GetTextureCompressQuality()) {
+		switch (quality) {
 		case 0:
 			ispc::bc7e_sse2_compress_block_params_init_ultrafast(&params, false);
             break;

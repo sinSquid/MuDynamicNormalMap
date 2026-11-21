@@ -16,7 +16,6 @@ namespace Mus {
 		}
 
 		void InitialConditionMap();
-		void InitialConditionList() { std::lock_guard lg(ConditionListLock); ConditionList.clear(); };
 
 		enum ConditionType : std::uint32_t {
 			HasKeyword,
@@ -66,8 +65,7 @@ namespace Mus {
                 return Priority < other.Priority;
 			}
 		};
-		bool RegisterCondition(Condition condition);
-		void SortConditions();
+		bool ReplaceConditions(std::vector<Condition> conditions);
 
 		const Condition GetCondition(RE::Actor* a_actor);
 
@@ -75,9 +73,10 @@ namespace Mus {
 	private:
         mutable std::shared_mutex ConditionListLock;
 		std::vector<Condition> ConditionList;
+        bool hasPublishedConditions = false;
 		std::unordered_map<std::string, ConditionType> ConditionMap;
 
-		const Condition ParseConditions(Condition condition);
+		Condition ParseConditions(Condition condition);
 		const ConditionType GetConditionType(std::string line, ConditionItem& item);
 
 		bool GetConditionFunction(ConditionItem& item);

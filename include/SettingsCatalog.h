@@ -1,5 +1,6 @@
 #pragma once
 #include "RuntimeTuning.h"
+#include "TextureCompressionPlan.h"
 #include <charconv>
 #include <cctype>
 #include <limits>
@@ -162,6 +163,13 @@ namespace Mus {
             (std::string_view(setting.key) == "logLevel" || std::string_view(setting.key) == "flushLevel");
     }
 
+    inline std::string FloatValueText(float value) {
+        char buffer[64];
+        const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general,
+            std::numeric_limits<float>::max_digits10);
+        return result.ec == std::errc{} ? std::string(buffer, result.ptr) : std::string{};
+    }
+
     inline std::string SettingValueText(const SettingDescriptor& setting, const RuntimeTuning& values) {
         const auto value = setting.read(values);
         if (const auto* b = std::get_if<bool>(&value)) return *b ? "true" : "false";
@@ -172,12 +180,7 @@ namespace Mus {
             }
             return std::to_string(*i);
         }
-        if (const auto* f = std::get_if<float>(&value)) {
-            char buffer[64];
-            const auto result = std::to_chars(buffer, buffer + sizeof(buffer), *f, std::chars_format::general,
-                std::numeric_limits<float>::max_digits10);
-            return result.ec == std::errc{} ? std::string(buffer, result.ptr) : std::string{};
-        }
+        if (const auto* f = std::get_if<float>(&value)) return FloatValueText(*f);
         return std::get<std::string>(value);
     }
 
@@ -333,13 +336,23 @@ namespace Mus {
             if (setting.policy == ApplyPolicy::Restart) setting.assign(to, setting.read(from));
     }
 
-    inline std::string RuntimeGenerationSignature(const RuntimeTuning& values) {
-        std::string signature = "MuGenerationV1;";
+    inline std::string RuntimeGenerationSignature(const RuntimeTuning& values, bool gpuGeneration) {
+        // CPU and GPU generation intentionally use different interpolation and
+        // sampling paths. Restart-only settings are normally omitted below, but
+        // the selected backend is part of the generated texture's identity.
+        std::string signature = std::string("MuGenerationV2;GPUEnable=") + (gpuGeneration ? "1;" : "0;");
         for (const auto& setting : GetSettingsCatalog()) {
             if (setting.policy != ApplyPolicy::Regenerate) continue;
             signature += setting.section; signature += '/'; signature += setting.key;
             signature += '='; signature += SettingValueText(setting, values); signature += ';';
         }
         return signature;
+    }
+    inline std::string RuntimeGenerationSignature(const RuntimeTuning& values) {
+        return RuntimeGenerationSignature(values, values.GPUEnable);
+    }
+    inline std::string RuntimeGenerationSignature(const RuntimeTuning& values, bool gpuGeneration,
+        const TextureCompressionPlan& compression) {
+        return RuntimeGenerationSignature(values, gpuGeneration) + TextureCompressionSignature(compression);
     }
 }

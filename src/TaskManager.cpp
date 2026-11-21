@@ -162,9 +162,8 @@ namespace Mus {
                 boundaryWeldDistance = std::max(floatPrecision, Config::GetSingleton().GetBoundaryWeldDistance());
                 boundaryWeldDistanceMult = 1.0f / boundaryWeldDistance;
                 if (reconfigure) InitialSetting();
-                ConditionManager::GetSingleton().InitialConditionList();
-                static_cast<MultipleConfig*>(&Config::GetSingleton())->LoadConditionFile();
-                ConditionManager::GetSingleton().SortConditions();
+                if (!static_cast<MultipleConfig*>(&Config::GetSingleton())->LoadConditionFile())
+                    throw std::runtime_error("无法读取条件文件");
                 if (regenerate && !updater.Init()) {
                     throw std::runtime_error("无法重新建立法线生成资源");
                 }
@@ -193,9 +192,7 @@ namespace Mus {
             try {
                 if (reconfigure) InitialSetting();
                 if (reconfigure || regenerate) {
-                    ConditionManager::GetSingleton().InitialConditionList();
                     static_cast<MultipleConfig*>(&Config::GetSingleton())->LoadConditionFile();
-                    ConditionManager::GetSingleton().SortConditions();
                 }
                 if (regenerate) updater.Init();
             } catch (...) { logger::error("Unable to restore all processing resources after failed settings apply"); }
@@ -1342,10 +1339,13 @@ namespace Mus {
                         InitialSetting();
                         actorWorkState->Clear();
                         geometryRetry.Clear();
-                        ConditionManager::GetSingleton().InitialConditionList();
-                        static_cast<MultipleConfig*>(&Config::GetSingleton())->LoadConditionFile();
-                        ConditionManager::GetSingleton().SortConditions();
+                        const bool rulesLoaded = static_cast<MultipleConfig*>(&Config::GetSingleton())->LoadConditionFile();
                         ObjectNormalMapUpdater::GetSingleton().Init();
+                        if (!rulesLoaded) {
+                            RE::SendHUDMessage::ShowHUDMessage("MDNM : Settings reloaded; previous conditions retained");
+                            isResetTasks = true;
+                            return EventResult::kContinue;
+                        }
                         RE::SendHUDMessage::ShowHUDMessage("MDNM : Reload done");
                         logger::info("Reload done");
                         isResetTasks = true;

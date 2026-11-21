@@ -162,7 +162,6 @@ namespace {
 
         Mus::ConditionManager::GetSingleton().InitialConditionMap();
         static_cast<Mus::MultipleConfig*>(&Mus::Config::GetSingleton())->LoadConditionFile();
-        Mus::ConditionManager::GetSingleton().SortConditions();
 
         Mus::InitialSetting();
 

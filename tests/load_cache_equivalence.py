@@ -15,7 +15,11 @@ new = (root / "src/ObjectNormalMapUpdater.cpp").read_text(encoding="utf-8-sig")
 def body(source, name):
     start = source.index("void ObjectNormalMapUpdater::LoadCacheResource(")
     end = source.index("bool ObjectNormalMapUpdater::CreateGeometryResourceData", start)
-    return source[start:end].replace("ObjectNormalMapUpdater::LoadCacheResource", name, 1)
+    extracted = source[start:end].replace("ObjectNormalMapUpdater::LoadCacheResource", name, 1)
+    # Signature construction is tested separately. Preserve the same deterministic
+    # hash service for old two-argument and new batch-signature call sites.
+    return extracted.replace("const std::string& generationSignature)",
+                             "const std::string& generationSignature = std::string{})", 1)
 
 prefix = r"""
 #include <algorithm>
@@ -77,7 +81,7 @@ struct NormalMapStore {
         disk = (hash & 1) != 0;
     }
 };
-std::uint64_t GetHash(const UpdateTextureSet& update, std::uint64_t geometryHash) {
+std::uint64_t GetHash(const UpdateTextureSet& update, std::uint64_t geometryHash, const std::string& = {}) {
     auto value = geometryHash * 1099511628211ull + update.slot;
     for (unsigned char c : update.textureName) value = value * 131 + c;
     return value;

@@ -1,5 +1,6 @@
 #pragma once
 #include <future>
+#include "TextureCompressionPlan.h"
 
 namespace Mus {
     class Ref {
@@ -403,7 +404,7 @@ namespace Mus {
         };
 
 		bool IsDetailNormalMap(const std::string& a_normalMapPath);
-        void LoadCacheResource(RE::FormID a_actorID, GeometryDataPtr a_data, UpdateSet& a_updateSet, MergedTextureGeometries& mergedTextureGeometries, ResourceDatas& resourceDatas, UpdateResult& results);
+        void LoadCacheResource(RE::FormID a_actorID, GeometryDataPtr a_data, UpdateSet& a_updateSet, MergedTextureGeometries& mergedTextureGeometries, ResourceDatas& resourceDatas, UpdateResult& results, const std::string& generationSignature);
 
 		DirectX::XMVECTOR SlerpVector(const DirectX::XMVECTOR& a, const DirectX::XMVECTOR& b, const float& t);
 		bool ComputeBarycentric(const float& px, const float& py, const DirectX::XMINT2& a, const DirectX::XMINT2& b, const DirectX::XMINT2& c, DirectX::XMFLOAT3& out);
@@ -414,8 +415,8 @@ namespace Mus {
 		bool CopySubresourceFromBuffer(ID3D11Device* device, ID3D11DeviceContext* context, std::vector<std::uint8_t>& buffer, UINT rowPitch, UINT mipLevel, ID3D11Texture2D* dstTexture);
 		bool CopySubresourceFromBuffer(ID3D11Device* device, ID3D11DeviceContext* context, std::vector<std::vector<std::uint8_t>>& buffer, std::vector<UINT>& rowPitch, ID3D11Texture2D* dstTexture);
 
-		void PostProcessing(ID3D11Device* device, ID3D11DeviceContext* context, ResourceDatas& resourceDatas, UpdateResult& results, MergedTextureGeometries& mergedTextureGeometries);
-        void PostProcessingGPU(ID3D11Device* device, ID3D11DeviceContext* context, ResourceDatas& resourceDatas, UpdateResult& results, MergedTextureGeometries& mergedTextureGeometries);
+		void PostProcessing(ID3D11Device* device, ID3D11DeviceContext* context, ResourceDatas& resourceDatas, UpdateResult& results, MergedTextureGeometries& mergedTextureGeometries, const TextureCompressionPlan& compression);
+        void PostProcessingGPU(ID3D11Device* device, ID3D11DeviceContext* context, ResourceDatas& resourceDatas, UpdateResult& results, MergedTextureGeometries& mergedTextureGeometries, const TextureCompressionPlan& compression);
 
 		bool MergeTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& rsourceData, ID3D11Texture2D* dstTex, ID3D11Texture2D* srcTex);
         bool MergeTextureGPU(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, ID3D11UnorderedAccessView* dstUAV, ID3D11Texture2D* dstTex, ID3D11ShaderResourceView* srcSRV);
@@ -423,8 +424,8 @@ namespace Mus {
 		bool GenerateMips(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, ID3D11Texture2D* texInOut);
 		bool GenerateMipsGPU(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, ID3D11ShaderResourceView* srvInOut, ID3D11Texture2D* texInOut);
 
-		bool CompressTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut);
-		bool CompressTextureBC7(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut);
+		bool CompressTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut, const TextureCompressionPlan& compression);
+		bool CompressTextureBC7(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut, int quality);
 
 		bool CopyResourceSecondToMain(TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>& srvInOut);
 		
@@ -451,7 +452,7 @@ namespace Mus {
         typedef std::vector<TextureResourceDataPtr> ResourceDataMap;
         ResourceDataMap resourceDataMap;
 
-		std::uint64_t GetHash(UpdateTextureSet updateSet, std::uint64_t geoHash);
+		std::uint64_t GetHash(const UpdateTextureSet& updateSet, std::uint64_t geoHash, const std::string& generationSignature);
 	};
 
 	class WaitForGPU {

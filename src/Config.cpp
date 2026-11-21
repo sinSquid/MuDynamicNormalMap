@@ -37,12 +37,13 @@ namespace Mus {
         return true;
     }
 
-    bool MultipleConfig::LoadConditionFile()
+    bool MultipleConfig::LoadConditionFile() try
     {
         std::string conditionPath = GetRuntimeSKSEDirectory();
         conditionPath += SKSE::PluginDeclaration::GetSingleton()->GetName().data();
         auto files = GetAllFiles(conditionPath);
         const auto size = files.size();
+        std::vector<std::optional<ConditionManager::Condition>> parsedFiles(size);
         tbb::parallel_for(
             tbb::blocked_range<std::size_t>(0, size),
             [&](const tbb::blocked_range<std::size_t>& r) {
@@ -57,7 +58,7 @@ namespace Mus {
                         continue;
                     std::ifstream ifile(file);
                     if (!ifile.is_open())
-                        continue;
+                        throw std::runtime_error("Cannot open condition file: " + filename);
 
                     logger::info("File found: {}", filename);
 
@@ -150,6 +151,7 @@ namespace Mus {
                             else if (variableName == "ProxyFirstScan")
                             {
                                 condition.ProxyFirstScan = GetBoolValue(variableValue);
+                                isNormalConditionFile = true;
                             }
                             else if (variableName == "Priority")
                             {
@@ -163,13 +165,21 @@ namespace Mus {
                             }
                         }
                     }
+                    if (ifile.bad() || (!ifile.eof() && ifile.fail()))
+                        throw std::runtime_error("Cannot read condition file: " + filename);
                     if (isNormalConditionFile)
-                        ConditionManager::GetSingleton().RegisterCondition(condition);
+                        parsedFiles[i].emplace(std::move(condition));
                 }
             },
             tbb::auto_partitioner()
         );
-        return true;
+        std::vector<ConditionManager::Condition> conditions;
+        for (auto& parsed : parsedFiles)
+            if (parsed) conditions.push_back(std::move(*parsed));
+        return ConditionManager::GetSingleton().ReplaceConditions(std::move(conditions));
+    } catch (const std::exception& error) {
+        logger::error("Condition reload failed; previous rules retained: {}", error.what());
+        return false;
     }
 
     SIMDType GetSIMDType(bool scan)

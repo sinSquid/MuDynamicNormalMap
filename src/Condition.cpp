@@ -47,21 +47,32 @@ namespace Mus {
 		return fallback;
 	}
 
-	bool ConditionManager::RegisterCondition(Condition condition)
-	{
-        std::lock_guard lg(ConditionListLock);
-		ConditionList.push_back(ParseConditions(condition));
-		return true;
-	}
-
-	void ConditionManager::SortConditions()
+    bool ConditionManager::ReplaceConditions(std::vector<Condition> conditions)
     {
-        std::lock_guard lg(ConditionListLock);
-        std::ranges::sort(ConditionList, std::ranges::greater(), &Condition::Priority);
-	}
+        bool valid = true;
+        for (auto& condition : conditions) {
+            condition = ParseConditions(std::move(condition));
+            if (std::ranges::any_of(condition.AND, [](const auto& group) { return group.empty(); }))
+                valid = false;
+        }
+        std::ranges::sort(conditions, [](const Condition& a, const Condition& b) {
+            return a.Priority != b.Priority ? a.Priority > b.Priority : a.fileName < b.fileName;
+        });
+        std::lock_guard lock(ConditionListLock);
+        if (!valid && hasPublishedConditions) {
+            logger::error("Invalid condition file; keeping previously loaded rules");
+            return false;
+        }
+        // On first load, valid files can still operate. Malformed rules never match.
+        ConditionList.swap(conditions);
+        hasPublishedConditions = true;
+        return valid;
+    }
 
-	const ConditionManager::Condition ConditionManager::ParseConditions(Condition condition)
+	ConditionManager::Condition ConditionManager::ParseConditions(Condition condition)
 	{
+		condition.AND.clear();
+        const bool unconditional = TrimConditionToken(condition.originalCondition).empty();
 		std::vector<std::string> splittedANDs = SplitTopLevelConditions(condition.originalCondition, "AND");
 
 		bool firstAND = true;
@@ -85,7 +96,7 @@ namespace Mus {
 				}
 
 				bool invalid = false;
-				if (GetConditionType(strOr, Item) == ConditionType::Error)
+				if ((!unconditional && strOr.empty()) || GetConditionType(strOr, Item) == ConditionType::Error)
 					invalid = true;
 				else
 				{
@@ -95,13 +106,18 @@ namespace Mus {
 						logger::debug("{}{}{} ...", firstOR ? "" : "OR ", Item.NOT ? "NOT " : "", magic_enum::enum_name(Item.type).data());
 					}
 					else
-						invalid = false;
+						invalid = true;
 				}
 
 				if (invalid)
 				{
 					logger::error("Found invalid condition! : {}{}{}", firstOR ? "" : "OR ", Item.NOT ? "NOT " : "", strOr);
 					logger::error("Cause file : {}", condition.fileName);
+                    // Invalid/missing OR operands cannot become None(true) or
+                    // disappear from an otherwise valid expression.
+                    condition.AND.clear();
+                    condition.AND.emplace_back();
+                    return condition;
 				}
 				firstOR = false;
 			}
@@ -112,13 +128,17 @@ namespace Mus {
 
 	const ConditionManager::ConditionType ConditionManager::GetConditionType(std::string line, ConditionItem& item)
 	{
-		std::vector<std::string> splittedMain = splitMulti(line, "()");
-		if (splittedMain.size() == 0)
+		std::string name, arguments;
+        if (!ReadConditionCall(line, name, arguments)) {
+            item.type = ConditionType::Error;
+            return item.type;
+        }
+		if (name.empty())
 		{
 			item.type = ConditionType::None;
 			return ConditionType::None;
 		}
-		std::string low = lowLetter(splittedMain[0]);
+		std::string low = lowLetter(name);
 		if (auto found = ConditionMap.find(low); found != ConditionMap.end())
 			item.type = found->second;
 		else
@@ -127,9 +147,9 @@ namespace Mus {
 			return ConditionType::Error;
 		}
 
-		if (splittedMain.size() > 1)
+		if (!arguments.empty())
 		{
-			std::vector<std::string> splitted = split(splittedMain[1], "|");
+			std::vector<std::string> splitted = split(arguments, "|");
 			if (splitted.size() == 1)
 			{
 				item.id = GetHex(splitted[0]);
@@ -147,6 +167,10 @@ namespace Mus {
 				item.id = GetHex(splitted[1]);
 				item.arg = splitted[2];
 			}
+            else {
+                item.type = ConditionType::Error;
+                return item.type;
+            }
 		}
 		return item.type;
 	}

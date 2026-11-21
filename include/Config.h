@@ -392,7 +392,7 @@ namespace Mus {
 
             for (const auto& file : std::filesystem::directory_iterator(folder))
             {
-                files.emplace_back(file.path());
+                if (file.is_regular_file()) files.emplace_back(file.path());
             }
             return files;
         }
