@@ -99,17 +99,23 @@ static void TestShader(ID3D11Device* device, ID3D11DeviceContext* context) {
         HR(device->CreateShaderResourceView(buffers[i].Get(),&srv,&views[i]));
     }
     std::array<unsigned,12> constants{5,3,0,6,0,0,0,0,0,0,4,0};
-    D3D11_BUFFER_DESC cb{};cb.ByteWidth=48;cb.Usage=D3D11_USAGE_IMMUTABLE;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_BUFFER_DESC cb{};cb.ByteWidth=48;cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     D3D11_SUBRESOURCE_DATA initial{constants.data(),0,0};ComPtr<ID3D11Buffer> constant;HR(device->CreateBuffer(&cb,&initial,&constant));
     D3D11_TEXTURE2D_DESC td{};td.Width=5;td.Height=3;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
     td.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;td.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
     ComPtr<ID3D11Texture2D> output,read;ComPtr<ID3D11UnorderedAccessView> uav;
     HR(device->CreateTexture2D(&td,nullptr,&output));HR(device->CreateUnorderedAccessView(output.Get(),nullptr,&uav));
+    auto ownerDesc=td;ownerDesc.Format=DXGI_FORMAT_R32_UINT;
+    ComPtr<ID3D11Texture2D> owner;ComPtr<ID3D11UnorderedAccessView> ownerUAV;
+    HR(device->CreateTexture2D(&ownerDesc,nullptr,&owner));HR(device->CreateUnorderedAccessView(owner.Get(),nullptr,&ownerUAV));
+    const UINT clearOwner[4]{};context->ClearUnorderedAccessViewUint(ownerUAV.Get(),clearOwner);
     const float clear[4]{};context->ClearUnorderedAccessViewFloat(uav.Get(),clear);
     ID3D11ShaderResourceView* resources[6]{};for(unsigned i=0;i<6;++i)resources[i]=views[i].Get();
     context->CSSetShaderResources(0,6,resources);context->CSSetConstantBuffers(0,1,constant.GetAddressOf());
-    context->CSSetShader(shader.Get(),nullptr,0);context->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),nullptr);context->Dispatch(1,1,1);
-    ID3D11UnorderedAccessView* noUAV=nullptr;context->CSSetUnorderedAccessViews(0,1,&noUAV,nullptr);
+    ID3D11UnorderedAccessView* outputs[]{uav.Get(),ownerUAV.Get()};
+    context->CSSetShader(shader.Get(),nullptr,0);context->CSSetUnorderedAccessViews(0,2,outputs,nullptr);
+    for(unsigned pass=0;pass<2;++pass){constants[11]=pass;context->UpdateSubresource(constant.Get(),0,nullptr,constants.data(),0,0);context->Dispatch(1,1,1);}
+    ID3D11UnorderedAccessView* noUAV[2]{};context->CSSetUnorderedAccessViews(0,2,noUAV,nullptr);
     td.Usage=D3D11_USAGE_STAGING;td.BindFlags=0;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     HR(device->CreateTexture2D(&td,nullptr,&read));context->CopyResource(read.Get(),output.Get());
     D3D11_MAPPED_SUBRESOURCE mapped{};HR(context->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped));

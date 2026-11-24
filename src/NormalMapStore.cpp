@@ -155,11 +155,18 @@ namespace Mus {
             } catch (const std::exception& e) {
                 logger::error("Disk cache read failed {:x}: {}", a_hash, e.what());
             }
-            if (resource) {
-                isDiskCache = true;
+            {
                 std::lock_guard lg(lock);
-				map[a_hash] = resource;
-				logger::debug("Found disk cache resource {:x}", a_hash);
+                // A generation may publish while this disk miss is reading or
+                // decoding. Prefer that resident result, even if disk loading failed.
+                const auto newer = map.find(a_hash);
+                if (newer != map.end()) {
+                    resource = newer->second;
+                } else if (resource) {
+                    map.emplace(a_hash, resource);
+                    isDiskCache = true;
+                    logger::debug("Found disk cache resource {:x}", a_hash);
+                }
 			}
 		}
 		if (resource)
@@ -411,7 +418,7 @@ namespace Mus {
 
 	TextureResourcePtr NormalMapStore::GetDiskCache(std::uint64_t a_hash)
 	{
-        std::lock_guard ioLock(diskIOLock);
+        std::unique_lock ioLock(diskIOLock);
 		if (!Config::GetSingleton().GetDiskCache())
 			return nullptr;
 
@@ -492,8 +499,25 @@ namespace Mus {
 
         if (!ValidateDiskCacheInfo(info))
             return nullptr;
-        std::vector<D3D11_SUBRESOURCE_DATA> initDatas(info.mipLevels);
-		std::vector<std::vector<std::uint8_t>> buffers(info.mipLevels);
+        // Reserve both snapshots and decoded buffers before allocating either.
+        // No waiting: a saturated optional cache falls back to regeneration.
+        std::uint64_t readBytes = 4096 + info.componentHashes.size() * sizeof(std::uint64_t);
+        for (std::uint32_t mip = 0; mip < info.mipLevels; ++mip) {
+            const auto bytes = MipByteSize(info, mip);
+            readBytes += bytes + LZ4_compressBound(static_cast<int>(bytes));
+        }
+        if (readBytes > diskReadBudget) return nullptr;
+        const auto previousBytes = diskReadBytes.fetch_add(readBytes, std::memory_order_relaxed);
+        if (previousBytes > diskReadBudget - readBytes) {
+            diskReadBytes.fetch_sub(readBytes, std::memory_order_relaxed);
+            return nullptr;
+        }
+        struct ReleaseReadMemory {
+            std::atomic<std::uint64_t>& total;
+            std::uint64_t bytes;
+            ~ReleaseReadMemory() { total.fetch_sub(bytes, std::memory_order_relaxed); }
+        } releaseReadMemory{diskReadBytes, readBytes};
+        std::vector<std::vector<char>> compressedMips(info.mipLevels);
 
 		for (UINT mipLevel = 0; mipLevel < info.mipLevels; mipLevel++) {
 			std::filesystem::path filePath = GetCacheFileName(a_hash, mipLevel);
@@ -513,7 +537,7 @@ namespace Mus {
 
 			std::uint64_t origSize = 0;
 			std::uint64_t compressedSize = 0;
-			std::vector<char> compressed;
+            auto& compressed = compressedMips[mipLevel];
 			try {
 
 				ifs.read(reinterpret_cast<char*>(&origSize), sizeof(origSize));
@@ -532,6 +556,23 @@ namespace Mus {
 				return nullptr;
 			}
 
+        }
+        // Publish only while this on-disk transaction is still current. Clear,
+        // replacement or eviction after unlock cannot be undone by this reader.
+        if (!isFound) {
+            std::lock_guard lg(diskCacheLock);
+            diskCacheInfoMap[a_hash] = info;
+        }
+        ioLock.unlock();
+
+        // Every mip belongs to one locked snapshot; no further file or metadata
+        // access is needed while decompression and D3D resource creation run.
+        std::vector<D3D11_SUBRESOURCE_DATA> initDatas(info.mipLevels);
+        std::vector<std::vector<std::uint8_t>> buffers(info.mipLevels);
+        for (UINT mipLevel = 0; mipLevel < info.mipLevels; ++mipLevel) {
+            auto& compressed = compressedMips[mipLevel];
+            const auto origSize = MipByteSize(info, mipLevel);
+            const auto compressedSize = compressed.size();
 			buffers[mipLevel].resize(origSize);
 			int result = LZ4_decompress_safe(compressed.data(),
 				reinterpret_cast<char*>(buffers[mipLevel].data()),
@@ -540,9 +581,10 @@ namespace Mus {
 			);
 
 			if (result != static_cast<int>(origSize)) {
-				logger::error("Failed to decompress {} file {:x}", filePath.string(), a_hash);
+				logger::error("Failed to decompress disk cache {:x} mip {}", a_hash, mipLevel);
 				return nullptr;
 			}
+            std::vector<char>().swap(compressed);
 
 			initDatas[mipLevel].pSysMem = buffers[mipLevel].data();
 			initDatas[mipLevel].SysMemPitch = info.rowPitch[mipLevel];
@@ -551,20 +593,18 @@ namespace Mus {
 
 		TextureResourcePtr result = std::make_shared<TextureResource>();
         result->componentHashes = info.componentHashes;
-		auto hr = Shader::ShaderManager::GetSingleton().GetDevice()->CreateTexture2D(&info.texDesc, initDatas.data(), &result->normalmapTexture2D);
+        auto* device = Shader::ShaderManager::GetSingleton().GetDevice();
+        if (!device) return nullptr;
+		auto hr = device->CreateTexture2D(&info.texDesc, initDatas.data(), &result->normalmapTexture2D);
 		if (FAILED(hr)) {
 			logger::error("Failed to create dst texture {:x} : {}", a_hash, hr);
 			return nullptr;
 		}
-		hr = Shader::ShaderManager::GetSingleton().GetDevice()->CreateShaderResourceView(result->normalmapTexture2D.Get(), &info.srvDesc, &result->normalmapShaderResourceView);
+		hr = device->CreateShaderResourceView(result->normalmapTexture2D.Get(), &info.srvDesc, &result->normalmapShaderResourceView);
 		if (FAILED(hr)) {
 			logger::error("Failed to create dst shader resource view {:x} : {}", a_hash, hr);
 			return nullptr;
 		}
-        if (!isFound) {
-            std::lock_guard lg(diskCacheLock);
-            diskCacheInfoMap[a_hash] = info;
-        }
 		return result;
 	}
 	void NormalMapStore::RemoveDiskCache(std::uint64_t a_hash)

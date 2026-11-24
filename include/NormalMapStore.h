@@ -1,6 +1,7 @@
 #pragma once
 #include "DiskWriteQueue.h"
 #include <future>
+#include <atomic>
 
 namespace Mus{
 	class NormalMapStore :
@@ -55,6 +56,10 @@ namespace Mus{
 		std::unordered_map<std::uint64_t, TextureResourcePtr> map;
 
 		std::recursive_mutex diskIOLock; // Serialize file transactions, reads and eviction.
+        // Bound aggregate compressed snapshots plus decoded CPU mip buffers.
+        // A validated entry can contain up to 512 MiB of decoded mip data.
+        static constexpr std::uint64_t diskReadBudget = 1028ull * 1024 * 1024;
+        std::atomic<std::uint64_t> diskReadBytes{0};
         std::mutex diskCacheLock;
 		struct DiskCacheInfo {
 			std::vector<std::uint64_t> componentHashes;

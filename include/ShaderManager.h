@@ -27,7 +27,7 @@ namespace Mus {
 			Blob GetPixelShaderBlob(std::string shaderName);
 
 			bool CreateDeviceContextWithSecondGPUImpl();
-			bool CreateDeviceContextWithSecondGPU();
+			void CreateDeviceContextWithSecondGPU();
 
 			ID3D11DeviceContext* GetContext();
 			ID3D11Device* GetDevice();
@@ -53,7 +53,7 @@ namespace Mus {
 
 			bool LoadComputeShader(ID3D11Device* device, const char* shaderCode, ID3D11ComputeShader** computeShader, Blob& shaderData);
 			bool LoadComputeShaderFile(ID3D11Device* device, const std::wstring& shaderFile, ID3D11ComputeShader** computeShader, Blob& shaderData);
-			bool LoadCompiledComputeShader(ID3D11Device* device, const std::wstring& shaderFile, ID3D11ComputeShader** computeShader);
+			bool LoadCompiledComputeShader(ID3D11Device* device, const std::wstring& shaderFile, ID3D11ComputeShader** computeShader, Blob& shaderData);
 
 			bool LoadVertexShader(ID3D11Device* device, const char* shaderCode, ID3D11VertexShader** vertexShader, Blob& shaderData);
 			bool LoadVertexShaderFile(ID3D11Device* device, const std::wstring& shaderFile, ID3D11VertexShader** vertexShader, Blob& shaderData);

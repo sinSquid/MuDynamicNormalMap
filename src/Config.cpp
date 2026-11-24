@@ -455,7 +455,7 @@ namespace Mus {
             whatCores = "all P-Cores";
         else if (useECores)
             whatCores = "all E-Cores";
-        gpuTask = std::make_unique<ThreadPool_GPUTaskModule>(gpuTaskThreadCount, coreMask, taskQTickMS, directTaskQ);
+        gpuTask = std::make_unique<ThreadPool_GPUTaskModule>(gpuTaskThreadCount, coreMask, std::chrono::milliseconds(taskQTickMS), directTaskQ);
 
         actorThreads = std::make_shared<ThreadPool_ParallelModule>(actorThreadCount, coreMask);
         actorThreadsFull = std::make_shared<ThreadPool_ParallelModule>(4, coreMask);

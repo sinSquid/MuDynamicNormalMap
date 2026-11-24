@@ -13,7 +13,7 @@ cbuffer ConstBuffer : register(b0)
     uint tangentZCorrection;
     float detailStrength;
     uint vertexEnd;
-    uint padding1;
+    uint ownershipPass; // 0: claim pixels; 1: shade only the final owner.
 };
 
 StructuredBuffer<float3> vertices   : register(t0); // a_data->vertices
@@ -29,6 +29,7 @@ Texture2D<float4> overlayTexture    : register(t8);
 Texture2D<float4> maskTexture       : register(t9);
 
 RWTexture2D<float4> dstTexture      : register(u0);
+RWTexture2D<uint> pixelOwner        : register(u1);
 
 SamplerState samplerState           : register(s0);
 
@@ -147,6 +148,18 @@ void CSMain(uint3 threadID : SV_DispatchThreadID)
                     continue;
 			}
 
+            uint2 wrapXY = uint2(WrapCoordinate(x, texWidth), WrapCoordinate(y, texHeight));
+            // The absolute triangle index is independent of dispatch chunking.
+            // Zero is the clear sentinel; the highest triangle index wins.
+            uint trianglePriority = index / 3 + 1;
+            if (ownershipPass == 0)
+            {
+                InterlockedMax(pixelOwner[wrapXY], trianglePriority);
+                continue;
+            }
+            if (pixelOwner[wrapXY] != trianglePriority)
+                continue;
+
             float3 bary = float3(w0, w1, w2) * invArea;
             float2 uv = xy * invTexSize;
             float4 dstColor = float4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -212,9 +225,6 @@ void CSMain(uint3 threadID : SV_DispatchThreadID)
                 dstColor.rgb = lerp(dstColor.rgb, overlayColor.rgb, overlayColor.a);
             }
 
-            uint wrapX = WrapCoordinate(x, texWidth);
-            uint wrapY = WrapCoordinate(y, texHeight);
-            uint2 wrapXY = uint2(wrapX, wrapY);
             dstTexture[wrapXY] = float4(dstColor.rgb, 1.0f);
         }
     }

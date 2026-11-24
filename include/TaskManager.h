@@ -77,7 +77,7 @@ namespace Mus {
 		void RegisterDelayTask(std::function<void()> func);
 		void RegisterDelayTask(std::int16_t delayTick, std::function<void()> func);
 
-		typedef std::unordered_map<std::size_t, RE::BSGeometry*> GeometryList;
+		using GeometryList = std::vector<RE::BSGeometry*>;
         GeometryList GetAllGeometries(RE::Actor* a_actor);
 
 		bool QUpdateNormalMap(RE::Actor* a_actor, bSlotbit bipedSlot = BipedObjectSlot::kAll, bool requireEnqueue = false);
@@ -136,13 +136,13 @@ namespace Mus {
 		std::string GetOriginalTexturePath(std::string a_textureName);
 		
 		std::string GetDetailNormalMapPath(std::string a_normalMapPath);
-		std::string GetDetailNormalMapPath(std::string a_normalMapPath, std::vector<std::string> a_proxyFolder, bool a_proxyFirstScan);
+		std::string GetDetailNormalMapPath(std::string a_normalMapPath, const std::vector<std::string>& a_proxyFolder, bool a_proxyFirstScan);
 		std::string GetDetailNormalMapPath(RE::Actor* a_actor);
 		std::string GetOverlayNormalMapPath(std::string a_normalMapPath);
-		std::string GetOverlayNormalMapPath(std::string a_normalMapPath, std::vector<std::string> a_proxyFolder, bool a_proxyFirstScan);
+		std::string GetOverlayNormalMapPath(std::string a_normalMapPath, const std::vector<std::string>& a_proxyFolder, bool a_proxyFirstScan);
 		std::string GetOverlayNormalMapPath(RE::Actor* a_actor);
 		std::string GetMaskNormalMapPath(std::string a_normalMapPath);
-		std::string GetMaskNormalMapPath(std::string a_normalMapPath, std::vector<std::string> a_proxyFolder, bool a_proxyFirstScan);
+		std::string GetMaskNormalMapPath(std::string a_normalMapPath, const std::vector<std::string>& a_proxyFolder, bool a_proxyFirstScan);
 		std::string GetMaskNormalMapPath(RE::Actor* a_actor);
 
 		std::string FixTexturePath(std::string texturePath);

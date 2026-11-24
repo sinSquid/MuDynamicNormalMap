@@ -493,8 +493,7 @@ namespace Mus {
 				return RE::BSVisit::BSVisitControl::kContinue;
             if (auto alphaProperty = geometry->GetGeometryRuntimeData().alphaProperty.get(); alphaProperty)
                 return RE::BSVisit::BSVisitControl::kContinue;
-            auto hash = ActorVertexHasher::Hash(geometry);
-            geometries.insert(std::make_pair(hash.GetHash(), geometry));
+            geometries.push_back(geometry);
 			return RE::BSVisit::BSVisitControl::kContinue;
         });
 		return geometries;
@@ -558,9 +557,10 @@ namespace Mus {
         auto gender = GetSex(a_actor);
 		GeometryDataPtr newGeometryData = std::make_shared<GeometryData>();
 		UpdateSet newUpdateSet;
-		for (auto& pair : a_srcGeometies)
+        struct LayerPaths { std::string detail, overlay, mask; };
+        std::unordered_map<std::string, LayerPaths> pathsBySource;
+		for (auto* geo : a_srcGeometies)
         {
-            auto geo = pair.second;
 			using Feature = RE::BSShaderMaterial::Feature;
 			if (!geo || geo->name.empty())
                 continue;
@@ -599,7 +599,7 @@ namespace Mus {
 			if ((!condition.HeadEnable || !Config::GetSingleton().GetHeadEnable()) && slot == RE::BIPED_OBJECT::kHead)
 				continue;
 
-			newGeometryData->CopyGeometryData(geo);
+			if (!newGeometryData->CopyGeometryData(geo)) continue;
 
 			if (bipedSlot & 1 << slot)
             {
@@ -609,11 +609,18 @@ namespace Mus {
                 newSet.textureName = GetTextureName(a_actor, slot, texturePath);
                 newSet.srcTexturePath = texturePath;
 
-                newSet.detailTexturePath = saveDetailTexturePath.empty() ? GetDetailNormalMapPath(texturePath, condition.ProxyDetailTextureFolder, condition.ProxyFirstScan) : saveDetailTexturePath;
-
-                newSet.overlayTexturePath = saveOverlayTexturePath.empty() ? GetOverlayNormalMapPath(texturePath, condition.ProxyOverlayTextureFolder, condition.ProxyFirstScan) : saveOverlayTexturePath;
-
-                newSet.maskTexturePath = saveMaskTexturePath.empty() ? GetMaskNormalMapPath(texturePath, condition.ProxyMaskTextureFolder, condition.ProxyFirstScan) : saveMaskTexturePath;
+                auto [paths, inserted] = pathsBySource.try_emplace(texturePath);
+                if (inserted) {
+                    paths->second.detail = saveDetailTexturePath.empty()
+                        ? GetDetailNormalMapPath(texturePath, condition.ProxyDetailTextureFolder, condition.ProxyFirstScan) : saveDetailTexturePath;
+                    paths->second.overlay = saveOverlayTexturePath.empty()
+                        ? GetOverlayNormalMapPath(texturePath, condition.ProxyOverlayTextureFolder, condition.ProxyFirstScan) : saveOverlayTexturePath;
+                    paths->second.mask = saveMaskTexturePath.empty()
+                        ? GetMaskNormalMapPath(texturePath, condition.ProxyMaskTextureFolder, condition.ProxyFirstScan) : saveMaskTexturePath;
+                }
+                newSet.detailTexturePath = paths->second.detail;
+                newSet.overlayTexturePath = paths->second.overlay;
+                newSet.maskTexturePath = paths->second.mask;
 
 				newSet.detailStrength = detailStrength;
 
@@ -962,7 +969,7 @@ namespace Mus {
 		}
 		return "";
 	}
-	std::string TaskManager::GetDetailNormalMapPath(std::string a_normalMapPath, std::vector<std::string> a_proxyFolder, bool a_proxyFirstScan)
+	std::string TaskManager::GetDetailNormalMapPath(std::string a_normalMapPath, const std::vector<std::string>& a_proxyFolder, bool a_proxyFirstScan)
 	{
 		std::string result;
 		if (!a_proxyFirstScan)
@@ -1025,7 +1032,7 @@ namespace Mus {
 		}
 		return "";
 	}
-	std::string TaskManager::GetOverlayNormalMapPath(std::string a_normalMapPath, std::vector<std::string> a_proxyFolder, bool a_proxyFirstScan)
+	std::string TaskManager::GetOverlayNormalMapPath(std::string a_normalMapPath, const std::vector<std::string>& a_proxyFolder, bool a_proxyFirstScan)
 	{
 		std::string result;
 		if (!a_proxyFirstScan)
@@ -1088,7 +1095,7 @@ namespace Mus {
 		}
 		return "";
 	}
-	std::string TaskManager::GetMaskNormalMapPath(std::string a_normalMapPath, std::vector<std::string> a_proxyFolder, bool a_proxyFirstScan)
+	std::string TaskManager::GetMaskNormalMapPath(std::string a_normalMapPath, const std::vector<std::string>& a_proxyFolder, bool a_proxyFirstScan)
 	{
 		std::string result;
 		if (!a_proxyFirstScan)
@@ -1159,62 +1166,145 @@ namespace Mus {
 		return FixTexturePath(a_textureName);
 	}
 
-	bool TaskManager::RemoveNormalMap(RE::Actor* a_actor)
+    bool TaskManager::RemoveNormalMap(RE::Actor* a_actor)
     {
         if (IsInvalidActor(a_actor)) return false;
+        const RE::NiPointer<RE::Actor> actorLifetime{a_actor};
         const auto actorID = a_actor->formID;
+        const auto session = PNS::SessionGeneration();
         if (!IsExistLastNormalMap(actorID) && !PNS::HasInstalledLayer(actorID)) return true;
 
-        MaterialLock materialLock;
-        std::unordered_set<RE::BSGeometry*> restoreGeometries;
-        RE::BSVisit::TraverseScenegraphGeometries(a_actor->loadedData->data3D.get(), [&](RE::BSGeometry* geometry) {
-            if (geometry) restoreGeometries.insert(geometry);
-            return RE::BSVisit::BSVisitControl::kContinue;
-        });
-        PNS::PruneInstalledLayers(actorID, restoreGeometries);
+        struct RestoreTarget {
+            RE::NiPointer<RE::BSGeometry> geometry;
+            RE::NiPointer<RE::BSLightingShaderProperty> shader;
+            RE::BSTSmartPointer<RE::BSLightingShaderMaterialBase> material;
+            RE::NiSourceTexturePtr normal;
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+            std::string path;
+        };
+        const auto root = a_actor->loadedData->data3D;
+        const auto readPath = [](RE::BSLightingShaderMaterialBase* material) {
+            return material->textureSet
+                ? lowLetter(GetTexturePath(material->textureSet.get(), RE::BSTextureSet::Texture::kNormal))
+                : std::string{};
+        };
+        const auto readView = [](RE::NiSourceTexture* normal) -> ID3D11ShaderResourceView* {
+            return normal && normal->rendererTexture
+                ? reinterpret_cast<ID3D11ShaderResourceView*>(normal->rendererTexture->resourceView) : nullptr;
+        };
+        const auto collectLive = [&] {
+            std::unordered_set<RE::BSGeometry*> live;
+            RE::BSVisit::TraverseScenegraphGeometries(root.get(), [&](RE::BSGeometry* geometry) {
+                if (geometry) live.insert(geometry);
+                return RE::BSVisit::BSVisitControl::kContinue;
+            });
+            return live;
+        };
+
         bool restoredAll = true;
-        for (auto geo : restoreGeometries)
+        std::vector<RestoreTarget> targets;
         {
-            const bool ownedLayer = PNS::OwnsInstalledGeometry(actorID, geo);
-            // An external material/wrapper now owns this shape. Retire only our
-            // stale bookkeeping (and a debug diffuse still demonstrably ours).
-            if (!ownedLayer && PNS::RetireInstalledGeometry(actorID, geo)) continue;
-            auto* lightingShader = netimmerse_cast<RE::BSLightingShaderProperty*>(
-                geo->GetGeometryRuntimeData().shaderProperty.get());
-            auto* material = lightingShader ? skyrim_cast<RE::BSLightingShaderMaterialBase*>(lightingShader->material) : nullptr;
-            if (!lightingShader || !material || !material->normalTexture ||
-                !lightingShader->flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kModelSpaceNormals)) {
-                if (ownedLayer) restoredAll = false;
-                continue;
+            MaterialLock materialLock;
+            const auto live = collectLive();
+            PNS::PruneInstalledLayers(actorID, live);
+            for (auto* geometry : live) {
+                const bool ownedLayer = PNS::OwnsInstalledGeometry(actorID, geometry);
+                if (!ownedLayer && PNS::RetireInstalledGeometry(actorID, geometry)) continue;
+                auto* shader = netimmerse_cast<RE::BSLightingShaderProperty*>(
+                    geometry->GetGeometryRuntimeData().shaderProperty.get());
+                auto* material = shader ? skyrim_cast<RE::BSLightingShaderMaterialBase*>(shader->material) : nullptr;
+                if (!material || !material->normalTexture ||
+                    !shader->flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kModelSpaceNormals)) {
+                    if (ownedLayer) restoredAll = false;
+                    continue;
+                }
+                auto& normal = material->normalTexture;
+                if (normal->name.empty() || !IsCreatedByMDNM(normal->name.c_str())) continue;
+                if (!ownedLayer && !Shader::TextureLoadManager::GetSingleton().OwnsNamedTexture(normal.get())) continue;
+                auto path = readPath(material);
+                if (path.empty()) {
+                    restoredAll = false;
+                    continue;
+                }
+                targets.push_back({RE::NiPointer<RE::BSGeometry>{geometry},
+                    RE::NiPointer<RE::BSLightingShaderProperty>{shader},
+                    RE::BSTSmartPointer<RE::BSLightingShaderMaterialBase>{material},
+                    normal, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{readView(normal.get())},
+                    std::move(path)});
             }
-            // Include generated overlays, but leave unrelated mods' replacements alone.
-            if (material->normalTexture->name.empty() || !IsCreatedByMDNM(material->normalTexture->name.c_str()))
-                continue;
-            // A retired private layer may retain its Mu name after an external
-            // replacement. Only a registered base or a live owned layer can be reset.
-            if (!ownedLayer && !Shader::TextureLoadManager::GetSingleton().OwnsNamedTexture(material->normalTexture.get()))
-                continue;
-            if (!material->textureSet) {
-                restoredAll = false;
-                continue;
-            }
-            std::string texturePath = lowLetter(GetTexturePath(material->textureSet.get(), RE::BSTextureSet::Texture::kNormal));
-            if (texturePath.empty()) {
-                restoredAll = false;
-                continue;
-            }
-            RE::NiPointer<RE::NiSourceTexture> texture;
-            Shader::TextureLoadManager::GetSingleton().LoadTexture(texturePath.c_str(), 1, texture, false);
-            if (!texture) {
-                restoredAll = false;
-                continue;
-            }
-            material->normalTexture = texture;
-            PNS::RetireInstalledGeometry(actorID, geo);
         }
-        // The distance sweep uses this registration to retry failed restores.
-        // Successful shapes have already released their pregnancy resource pins.
-        if (restoredAll) RemoveLastNormalMap(actorID);
+
+        // Engine texture loading stays on the game thread, outside our renderer
+        // lock, and each path is loaded only once per restore operation.
+        std::unordered_map<std::string, RE::NiSourceTexturePtr> originals;
+        for (const auto& target : targets) {
+            auto [entry, inserted] = originals.try_emplace(target.path);
+            if (inserted)
+                Shader::TextureLoadManager::LoadTexture(target.path.c_str(), 1, entry->second, false);
+        }
+
+        {
+            MaterialLock materialLock;
+            if (IsInvalidActor(a_actor) || a_actor->loadedData->data3D.get() != root.get() ||
+                PNS::SessionGeneration() != session || GetIsUpdating(actorID)) return false;
+            const auto live = collectLive();
+            PNS::PruneInstalledLayers(actorID, live);
+            for (const auto& target : targets) {
+                auto* geometry = target.geometry.get();
+                if (!live.contains(geometry)) {
+                    restoredAll = false;
+                    continue;
+                }
+                auto* material = target.material.get();
+                if (geometry->GetGeometryRuntimeData().shaderProperty.get() != target.shader.get() ||
+                    target.shader->material != material ||
+                    !target.shader->flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kModelSpaceNormals) ||
+                    material->normalTexture.get() != target.normal.get() ||
+                    readView(material->normalTexture.get()) != target.view.Get() ||
+                    readPath(material) != target.path) {
+                    restoredAll = false;
+                    continue;
+                }
+                const auto& texture = originals.at(target.path);
+                if (!texture) {
+                    restoredAll = false;
+                    continue;
+                }
+                material->normalTexture = texture;
+                PNS::RetireInstalledGeometry(actorID, geometry);
+            }
+            if (restoredAll) {
+                // Loading can reenter and install a result on a shape absent
+                // from targets, or start a new generation. Recheck current users
+                // of every cache entry we are about to release, under this same
+                // renderer lock. Names alone do not establish texture ownership.
+                if (GetIsUpdating(actorID)) return false;
+                std::unordered_set<std::string> retiringNames;
+                {
+                    std::shared_lock lock(lastNormalMapLock);
+                    if (const auto found = lastNormalMap.find(actorID); found != lastNormalMap.end())
+                        for (const auto& entry : found->second) retiringNames.insert(entry->GetTextureName());
+                }
+                const auto referencesRetiringTexture = [&](const RE::NiSourceTexturePtr& texture) {
+                    return texture && retiringNames.contains(texture->name.c_str()) &&
+                        Shader::TextureLoadManager::GetSingleton().OwnsNamedTexture(texture.get());
+                };
+                const auto currentLive = collectLive();
+                PNS::PruneInstalledLayers(actorID, currentLive);
+                for (auto* geometry : currentLive) {
+                    if (PNS::OwnsInstalledGeometry(actorID, geometry)) return false;
+                    PNS::RetireInstalledGeometry(actorID, geometry);
+                    auto* shader = netimmerse_cast<RE::BSLightingShaderProperty*>(
+                        geometry->GetGeometryRuntimeData().shaderProperty.get());
+                    auto* material = shader ? skyrim_cast<RE::BSLightingShaderMaterialBase*>(shader->material) : nullptr;
+                    // Ordinary Mu DebugTexture historically shares this named
+                    // wrapper with diffuse; do not turn it into a permanent pin.
+                    // Pregnancy debug diffuse is retired by its own ledger above.
+                    if (material && referencesRetiringTexture(material->normalTexture)) return false;
+                }
+                RemoveLastNormalMap(actorID);
+            }
+        }
         return restoredAll;
     }
 
@@ -1399,9 +1489,8 @@ namespace Mus {
                         auto gender = GetSex(target);
                         GeometryData geoData;
                         auto geometries = GetAllGeometries(target);
-                        for (auto& pair : geometries)
+                        for (auto* geo : geometries)
                         {
-                            auto geo = pair.second;
                             using Feature = RE::BSShaderMaterial::Feature;
                             if (!geo || geo->name.empty())
                                 continue;

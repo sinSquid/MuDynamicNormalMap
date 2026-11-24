@@ -91,7 +91,7 @@ namespace Mus {
             MakeSetting<&RuntimeTuning::EcoreUse>("Performance", "EcoreUse", "优先使用能效核心", "等待所有更新完成后，重新配置任务队列和CPU处理资源。", SettingType::Boolean, 0, 1, "", ApplyPolicy::IdleReconfigure, false, 0, 1),
             MakeSetting<&RuntimeTuning::ProcessingInLoading>("Performance", "ProcessingInLoading", "加载画面中预处理", "保存后重启游戏生效，避免运行期间重建设备或后台检测资源。", SettingType::Boolean, 0, 1, "", ApplyPolicy::Restart, false, 0, 1),
             MakeSetting<&RuntimeTuning::ProcessingInLoadingWithMainGPU>("Performance", "ProcessingInLoadingWithMainGPU", "加载画面使用主GPU", "保存后重启游戏生效，避免运行期间重建设备或后台检测资源。", SettingType::Boolean, 0, 1, "", ApplyPolicy::Restart, false, 0, 1),
-            MakeSetting<&RuntimeTuning::TaskQTickMS>("Performance", "TaskQTickMS", "GPU任务间隔毫秒", "等待所有更新完成后，重新配置任务队列和CPU处理资源。 0表示每帧处理队列；只对4/5预设生效，0–3预设忽略本项。", SettingType::Integer, 0, 60000, "", ApplyPolicy::IdleReconfigure, false, 0, 60000),
+            MakeSetting<&RuntimeTuning::TaskQTickMS>("Performance", "TaskQTickMS", "GPU任务间隔毫秒", "等待所有更新完成后，重新配置任务队列和CPU处理资源。0 表示无额外等待。只对 4/5 预设生效。", SettingType::Integer, 0, 60000, "", ApplyPolicy::IdleReconfigure, false, 0, 60000),
             MakeSetting<&RuntimeTuning::TextureCompress>("Performance", "TextureCompress", "纹理压缩方式", "-1自动，0不压缩，1 CPU BC7，2 GPU BC7；主GPU压缩不支持后台处理；GPU方式仍有纹理回读成本，不保证更快。更改后重新生成。", SettingType::Choice, -1, 2, "自动|不压缩|CPU BC7|GPU BC7", ApplyPolicy::Regenerate, false, -1, 2),
             MakeSetting<&RuntimeTuning::TextureCompressQuality>("Performance", "TextureCompressQuality", "纹理压缩质量", "作者范围0–7：较高值提高质量并延长压缩时间；更改后重新生成。", SettingType::Integer, 0, 7, "", ApplyPolicy::Regenerate, false, 0, 7),
             MakeSetting<&RuntimeTuning::SIMDtype>("Performance", "SIMDtype", "CPU压缩指令集", "等待所有更新完成后，重新配置任务队列和CPU处理资源。 实际指令集仍按CPU支持情况回退。", SettingType::Choice, 0, 4, "自动|SSE2|SSE4|AVX|AVX2", ApplyPolicy::IdleReconfigure, false, 0, 4),
@@ -340,7 +340,7 @@ namespace Mus {
         // CPU and GPU generation intentionally use different interpolation and
         // sampling paths. Restart-only settings are normally omitted below, but
         // the selected backend is part of the generated texture's identity.
-        std::string signature = std::string("MuGenerationV2;GPUEnable=") + (gpuGeneration ? "1;" : "0;");
+        std::string signature = std::string("MuGenerationV5;GPUEnable=") + (gpuGeneration ? "1;" : "0;");
         for (const auto& setting : GetSettingsCatalog()) {
             if (setting.policy != ApplyPolicy::Regenerate) continue;
             signature += setting.section; signature += '/'; signature += setting.key;

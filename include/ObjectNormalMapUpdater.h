@@ -183,11 +183,7 @@ namespace Mus {
 			};
 			GenerateMipsData generateMipsData;
 
-			struct TextureCompressData {
-				Microsoft::WRL::ComPtr<ID3D11Texture2D> srcStagingTexture = nullptr;
-				Microsoft::WRL::ComPtr<ID3D11Texture2D> dstStagingTexture = nullptr;
-			};
-			TextureCompressData textureCompressData;
+
 
 			struct CopySecondToMainData {
 				Microsoft::WRL::ComPtr<ID3D11Texture2D> copyTexture2D = nullptr;
@@ -214,7 +210,7 @@ namespace Mus {
             UINT tangentZCorrection;
             float detailStrength;
             UINT vertexEnd;
-            UINT padding1;
+            UINT ownershipPass;
         };
         static_assert(sizeof(UpdateNormalMapBufferData) % 16 == 0, "Constant buffer must be 16-byte aligned.");
         Microsoft::WRL::ComPtr<ID3D11Buffer> updateNormalMapBuffer[2] = {nullptr, nullptr};
@@ -281,6 +277,7 @@ namespace Mus {
                 context->CSGetShaderResources(8, 1, &overlaySRV);
                 context->CSGetShaderResources(9, 1, &maskSRV);
                 context->CSGetUnorderedAccessViews(0, 1, &dstUAV);
+                context->CSGetUnorderedAccessViews(1, 1, &ownerUAV);
                 context->CSGetSamplers(0, 1, &samplerState);
                 Unbind(context);
             }
@@ -299,6 +296,7 @@ namespace Mus {
                 context->CSSetShaderResources(8, 1, overlaySRV.GetAddressOf());
                 context->CSSetShaderResources(9, 1, maskSRV.GetAddressOf());
                 context->CSSetUnorderedAccessViews(0, 1, dstUAV.GetAddressOf(), nullptr);
+                context->CSSetUnorderedAccessViews(1, 1, ownerUAV.GetAddressOf(), nullptr);
                 context->CSSetSamplers(0, 1, samplerState.GetAddressOf());
             }
 
@@ -306,13 +304,13 @@ namespace Mus {
             void Unbind(ID3D11DeviceContext* context) {
                 ID3D11Buffer* emptyBuffer[1] = {nullptr};
                 ID3D11ShaderResourceView* emptySRV[10] = {nullptr};
-                ID3D11UnorderedAccessView* emptyUAV[1] = {nullptr};
+                ID3D11UnorderedAccessView* emptyUAV[2] = {nullptr, nullptr};
                 ID3D11SamplerState* emptySamplerState[1] = {nullptr};
 
                 context->CSSetShader(nullptr, nullptr, 0);
                 context->CSSetConstantBuffers(0, 1, emptyBuffer);
                 context->CSSetShaderResources(0, 10, emptySRV);
-                context->CSSetUnorderedAccessViews(0, 1, emptyUAV, nullptr);
+                context->CSSetUnorderedAccessViews(0, 2, emptyUAV, nullptr);
                 context->CSSetSamplers(0, 1, emptySamplerState);
             }
 
@@ -329,6 +327,7 @@ namespace Mus {
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> overlaySRV;
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> maskSRV;
             Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> dstUAV;
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ownerUAV;
             Microsoft::WRL::ComPtr<ID3D11SamplerState> samplerState;
         };
 
@@ -407,7 +406,6 @@ namespace Mus {
         void LoadCacheResource(RE::FormID a_actorID, GeometryDataPtr a_data, UpdateSet& a_updateSet, MergedTextureGeometries& mergedTextureGeometries, ResourceDatas& resourceDatas, UpdateResult& results, const std::string& generationSignature);
 
 		DirectX::XMVECTOR SlerpVector(const DirectX::XMVECTOR& a, const DirectX::XMVECTOR& b, const float& t);
-		bool ComputeBarycentric(const float& px, const float& py, const DirectX::XMINT2& a, const DirectX::XMINT2& b, const DirectX::XMINT2& c, DirectX::XMFLOAT3& out);
         bool CreateConstBuffer(ID3D11Device* device, UINT byteWidth, Microsoft::WRL::ComPtr<ID3D11Buffer>& bufferOut);
 		bool CreateStructuredBuffer(ID3D11Device* device, const void* data, UINT size, UINT stride, Microsoft::WRL::ComPtr<ID3D11Buffer>& bufferOut, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>& srvOut);
 		bool CopySubresourceRegion(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* dstTexture, ID3D11Texture2D* srcTexture, UINT dstMipMapLevel, UINT srcMipMapLevel);
@@ -424,12 +422,11 @@ namespace Mus {
 		bool GenerateMips(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, ID3D11Texture2D* texInOut);
 		bool GenerateMipsGPU(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, ID3D11ShaderResourceView* srvInOut, ID3D11Texture2D* texInOut);
 
-		bool CompressTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut, const TextureCompressionPlan& compression);
-		bool CompressTextureBC7(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut, int quality);
+		bool CompressTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut, const TextureCompressionPlan& compression, Microsoft::WRL::ComPtr<ID3D11Texture2D>& stagingScratch);
+		bool CompressTextureBC7(ID3D11Device* device, ID3D11DeviceContext* context, TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut, int quality, Microsoft::WRL::ComPtr<ID3D11Texture2D>& stagingScratch);
 
 		bool CopyResourceSecondToMain(TextureResourceDataPtr& resourceData, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texInOut, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>& srvInOut);
 		
-		void GPUPerformanceLog(ID3D11Device* device, ID3D11DeviceContext* context, std::string funcStr, bool isEnd, bool isAverage = true, std::uint32_t args = 0);
 
 		struct GeometryResourceData {
 			Microsoft::WRL::ComPtr<ID3D11Buffer> vertexBuffer = nullptr;

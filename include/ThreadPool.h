@@ -196,11 +196,10 @@ namespace Mus {
     extern std::unique_ptr<ThreadPool_ParallelModule> backGroundWorkerThreads;
 
     class ThreadPool_GPUTaskModule
-        : public IEventListener<FrameEvent>
     {
     public:
         ThreadPool_GPUTaskModule() = delete;
-        ThreadPool_GPUTaskModule(std::uint32_t a_threadSize, std::uint64_t a_coreMask, std::clock_t a_taskQTick, bool a_directTaskQ);
+        ThreadPool_GPUTaskModule(std::uint32_t a_threadSize, std::uint64_t a_coreMask, std::chrono::milliseconds cooldown, bool a_directTaskQ);
         ~ThreadPool_GPUTaskModule();
         void BeginDrain();
 
@@ -222,9 +221,6 @@ namespace Mus {
         }
 
         inline std::size_t GetThreads() const { return workers.size(); };
-    protected:
-        void onEvent(const FrameEvent& e) override;
-
     private:
         const std::uint64_t coreMask = 0;
 
@@ -234,15 +230,11 @@ namespace Mus {
         std::condition_variable cv;
         std::atomic<bool> stop;
 
-        const std::clock_t taskQTick = 0;
+        const std::chrono::milliseconds cooldown;
         const bool directTaskQ = false;
-        bool draining = false; // Protected by queueMutex; quit ignores frame pacing.
+        bool draining = false; // Protected by queueMutex; quit ignores pacing.
 
-        std::vector<std::clock_t> lastTickTime;
-        std::vector<bool> runTask;
-        std::vector<bool> running;
-
-        void workerLoop(std::uint32_t threadNum);
+        void workerLoop();
     };
     extern std::unique_ptr<ThreadPool_GPUTaskModule> gpuTask;
 }

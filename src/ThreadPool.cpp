@@ -58,18 +58,25 @@ namespace Mus
 
     std::unique_ptr<ThreadPool_GPUTaskModule> gpuTask;
 
-    ThreadPool_GPUTaskModule::ThreadPool_GPUTaskModule(std::uint32_t a_threadSize, std::uint64_t a_coreMask, std::clock_t a_taskQTick, bool a_directTaskQ)
+    ThreadPool_GPUTaskModule::ThreadPool_GPUTaskModule(std::uint32_t a_threadSize, std::uint64_t a_coreMask, std::chrono::milliseconds interval, bool a_directTaskQ)
         : coreMask(a_coreMask)
-        , stop(false), taskQTick(a_taskQTick)
+        , stop(false), cooldown(interval)
         , directTaskQ(a_directTaskQ)
     {
         std::uint32_t threadCount = std::max(1u, a_threadSize);
-        lastTickTime.resize(threadCount, currentTime.load());
-        runTask.resize(threadCount, true);
-        running.resize(threadCount, false);
-        for (std::uint32_t i = 0; i < threadCount; i++)
-            workers.emplace_back([this, i] { workerLoop(i); });
-        g_frameEventDispatcher.addListener(this);
+        try {
+            workers.reserve(threadCount);
+            for (std::uint32_t i = 0; i < threadCount; ++i)
+                workers.emplace_back([this] { workerLoop(); });
+        } catch (...) {
+            {
+                std::lock_guard lock(queueMutex);
+                stop.store(true);
+            }
+            cv.notify_all();
+            for (auto& worker : workers) worker.join();
+            throw;
+        }
     }
 
     ThreadPool_GPUTaskModule::~ThreadPool_GPUTaskModule() {
@@ -80,7 +87,6 @@ namespace Mus
         cv.notify_all();
         for (auto& t : workers)
             if (t.joinable()) t.join();
-        g_frameEventDispatcher.removeListener(this);
     }
 
     void ThreadPool_GPUTaskModule::BeginDrain() {
@@ -92,53 +98,29 @@ namespace Mus
         cv.notify_all();
     }
 
-    void ThreadPool_GPUTaskModule::workerLoop(std::uint32_t threadNum) {
+    void ThreadPool_GPUTaskModule::workerLoop() {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         if (coreMask != 0)
             SetThreadAffinityMask(GetCurrentThread(), coreMask);
+        using Clock = std::chrono::steady_clock;
+        auto readyAt = Clock::now();
         while (true) {
             std::function<void()> task;
             {
                 std::unique_lock lock(queueMutex);
-                cv.wait(lock, [this, threadNum] {
-                    return stop.load() || (!tasks.empty() && (draining || runTask[threadNum] || directTaskQ));
-                });
-                runTask[threadNum] = false;
-                running[threadNum] = true;
-                if (stop.load() && tasks.empty())
-                    return;
+                cv.wait(lock, [this] { return stop.load() || !tasks.empty(); });
+                if (!directTaskQ && !draining && !stop.load())
+                    cv.wait_until(lock, readyAt, [this] { return draining || stop.load(); });
+                // Another worker can consume the last queued job while we cool down.
+                if (tasks.empty()) {
+                    if (stop.load()) return;
+                    continue;
+                }
                 task = std::move(tasks.front());
                 tasks.pop();
             }
             task();
-            {
-                std::lock_guard lock(queueMutex);
-                lastTickTime[threadNum] = currentTime.load();
-                running[threadNum] = false;
-            }
+            readyAt = Clock::now() + cooldown;
         }
-    }
-
-    void ThreadPool_GPUTaskModule::onEvent(const FrameEvent& e)
-    {
-        if (directTaskQ) return;
-        std::lock_guard lock(queueMutex);
-        if (tasks.empty()) return;
-        std::uint32_t notified = 0;
-        for (std::uint32_t i = 0; i < GetThreads(); i++)
-        {
-            if (running[i])
-                continue;
-            if (!directTaskQ) 
-            {
-                if (lastTickTime[i] + taskQTick > currentTime)
-                    continue;
-            }
-            runTask[i] = true;
-            notified++;
-        }
-        if (notified == 0)
-            return;
-        cv.notify_all();
     }
 }

@@ -1,4 +1,5 @@
 #include "ShaderManager.h"
+#include <d3d11shader.h>
 
 namespace Mus {
 	namespace Shader {
@@ -30,7 +31,8 @@ namespace Mus {
 			Blob errorBlob;
 			HRESULT hr = D3DCompile(shaderCode, std::strlen(shaderCode), nullptr, nullptr, nullptr, "CSMain", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shaderData.ReleaseAndGetAddressOf(), &errorBlob);
 			if (FAILED(hr)) {
-				logger::error("Failed to compile shader {} : {}", hr, errorBlob ? errorBlob->GetBufferPointer() : "Unknown Error");
+				logger::error("Failed to compile in-memory shader ({}): {}", hr,
+                    errorBlob ? static_cast<const char*>(errorBlob->GetBufferPointer()) : "No compiler diagnostics");
 				return false;
 			}
 			hr = device->CreateComputeShader(shaderData->GetBufferPointer(), shaderData->GetBufferSize(), nullptr, computeShader);
@@ -45,10 +47,11 @@ namespace Mus {
 			if (!device || shaderFile.empty())
 				return false;
 			Blob errorBlob;
-			HRESULT hr = D3DCompileFromFile(shaderFile.c_str(), nullptr, nullptr, "CSMain", "cs_5_0", 0, 0, shaderData.ReleaseAndGetAddressOf(), nullptr);
+			HRESULT hr = D3DCompileFromFile(shaderFile.c_str(), nullptr, nullptr, "CSMain", "cs_5_0", 0, 0, shaderData.ReleaseAndGetAddressOf(), errorBlob.ReleaseAndGetAddressOf());
 			if (FAILED(hr))
 			{
-				logger::error("Failed to compile shader {} : {}", hr, errorBlob ? errorBlob->GetBufferPointer() : "Unknown Error");
+				logger::error("Failed to compile shader {} ({}): {}", wstring2string(shaderFile), hr,
+                    errorBlob ? static_cast<const char*>(errorBlob->GetBufferPointer()) : "No compiler diagnostics");
 				return false;
 			}
 			hr = device->CreateComputeShader(shaderData->GetBufferPointer(), shaderData->GetBufferSize(), nullptr, computeShader);
@@ -59,21 +62,13 @@ namespace Mus {
 			}
 			return true;
 		}
-		bool ShaderManager::LoadCompiledComputeShader(ID3D11Device* device, const std::wstring& shaderFile, ID3D11ComputeShader** computeShader)
+		bool ShaderManager::LoadCompiledComputeShader(ID3D11Device* device, const std::wstring& shaderFile, ID3D11ComputeShader** computeShader, Blob& shaderData)
 		{
 			if (!device || shaderFile.empty())
 				return false;
-			std::ifstream file(shaderFile, std::ios::binary);
-			if (!file.is_open()) {
+			if (FAILED(D3DReadFileToBlob(shaderFile.c_str(), shaderData.ReleaseAndGetAddressOf())))
 				return false;
-			}
-			file.seekg(0, std::ios::end);
-			size_t fileSize = static_cast<size_t>(file.tellg());
-			file.seekg(0, std::ios::beg);
-			std::vector<char> shaderData(fileSize);
-			file.read(shaderData.data(), fileSize);
-			file.close();
-			HRESULT hr = device->CreateComputeShader(shaderData.data(), fileSize, nullptr, computeShader);
+			HRESULT hr = device->CreateComputeShader(shaderData->GetBufferPointer(), shaderData->GetBufferSize(), nullptr, computeShader);
 			if (FAILED(hr)) {
 				logger::error("Failed to create shader {}", hr);
 				return false;
@@ -88,7 +83,8 @@ namespace Mus {
 			Blob errorBlob;
 			HRESULT hr = D3DCompile(shaderCode, std::strlen(shaderCode), nullptr, nullptr, nullptr, "VSMain", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shaderData.ReleaseAndGetAddressOf(), &errorBlob);
 			if (FAILED(hr)) {
-				logger::error("Failed to compile shader {} : {}", hr, errorBlob ? errorBlob->GetBufferPointer() : "Unknown Error");
+				logger::error("Failed to compile in-memory shader ({}): {}", hr,
+                    errorBlob ? static_cast<const char*>(errorBlob->GetBufferPointer()) : "No compiler diagnostics");
 				return false;
 			}
 			hr = device->CreateVertexShader(shaderData->GetBufferPointer(), shaderData->GetBufferSize(), nullptr, vertexShader);
@@ -103,10 +99,11 @@ namespace Mus {
 			if (!device || shaderFile.empty())
 				return false;
 			Blob errorBlob;
-			HRESULT hr = D3DCompileFromFile(shaderFile.c_str(), nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, shaderData.ReleaseAndGetAddressOf(), nullptr);
+			HRESULT hr = D3DCompileFromFile(shaderFile.c_str(), nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, shaderData.ReleaseAndGetAddressOf(), errorBlob.ReleaseAndGetAddressOf());
 			if (FAILED(hr))
 			{
-				logger::error("Failed to compile shader {} : {}", hr, errorBlob ? errorBlob->GetBufferPointer() : "Unknown Error");
+				logger::error("Failed to compile shader {} ({}): {}", wstring2string(shaderFile), hr,
+                    errorBlob ? static_cast<const char*>(errorBlob->GetBufferPointer()) : "No compiler diagnostics");
 				return false;
 			}
 			hr = device->CreateVertexShader(shaderData->GetBufferPointer(), shaderData->GetBufferSize(), nullptr, vertexShader);
@@ -146,7 +143,8 @@ namespace Mus {
 			Blob errorBlob;
 			HRESULT hr = D3DCompile(shaderCode, std::strlen(shaderCode), nullptr, nullptr, nullptr, "PSMain", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shaderData.ReleaseAndGetAddressOf(), &errorBlob);
 			if (FAILED(hr)) {
-				logger::error("Failed to compile shader {} : {}", hr, errorBlob ? errorBlob->GetBufferPointer() : "Unknown Error");
+				logger::error("Failed to compile in-memory shader ({}): {}", hr,
+                    errorBlob ? static_cast<const char*>(errorBlob->GetBufferPointer()) : "No compiler diagnostics");
 				return false;
 			}
 			hr = device->CreatePixelShader(shaderData->GetBufferPointer(), shaderData->GetBufferSize(), nullptr, pixelShader);
@@ -161,10 +159,11 @@ namespace Mus {
 			if (!device || shaderFile.empty())
 				return false;
 			Blob errorBlob;
-			HRESULT hr = D3DCompileFromFile(shaderFile.c_str(), nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, shaderData.ReleaseAndGetAddressOf(), nullptr);
+			HRESULT hr = D3DCompileFromFile(shaderFile.c_str(), nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, shaderData.ReleaseAndGetAddressOf(), errorBlob.ReleaseAndGetAddressOf());
 			if (FAILED(hr))
 			{
-				logger::error("Failed to compile shader {} : {}", hr, errorBlob ? errorBlob->GetBufferPointer() : "Unknown Error");
+				logger::error("Failed to compile shader {} ({}): {}", wstring2string(shaderFile), hr,
+                    errorBlob ? static_cast<const char*>(errorBlob->GetBufferPointer()) : "No compiler diagnostics");
 				return false;
 			}
 			hr = device->CreatePixelShader(shaderData->GetBufferPointer(), shaderData->GetBufferSize(), nullptr, pixelShader);
@@ -225,6 +224,23 @@ namespace Mus {
             return string2wstring(file);
 		}
 
+        static bool IsCompatibleComputeShader(std::string_view name, ID3DBlob* bytecode)
+        {
+            if (name != "updatenormalmap") return true;
+            Microsoft::WRL::ComPtr<ID3D11ShaderReflection> reflection;
+            D3D11_SHADER_INPUT_BIND_DESC owner{};
+            if (bytecode &&
+                SUCCEEDED(D3DReflect(bytecode->GetBufferPointer(), bytecode->GetBufferSize(),
+                    __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()))) &&
+                SUCCEEDED(reflection->GetResourceBindingDescByName("pixelOwner", &owner)) &&
+                owner.Type == D3D_SIT_UAV_RWTYPED && owner.BindPoint == 1 &&
+                owner.ReturnType == D3D_RETURN_TYPE_UINT && owner.Dimension == D3D_SRV_DIMENSION_TEXTURE2D) {
+                return true;
+            }
+            logger::error("UpdateNormalMap shader is missing the pixel ownership UAV. Install the HLSL and CSO from this build.");
+            return false;
+        }
+
 		ShaderManager::ComputeShader ShaderManager::CreateComputeShader(ID3D11Device* device, std::string shaderName)
 		{
 			std::string shaderName_ = lowLetter(shaderName);
@@ -234,7 +250,8 @@ namespace Mus {
 				return nullptr;
 			ComputeShader newShader = nullptr;
 			Blob csBlob = nullptr;
-			if (LoadComputeShaderFile(device, GetShaderFilePath(shaderName, false, ShaderType::Compute), &newShader, csBlob))
+			if (LoadComputeShaderFile(device, GetShaderFilePath(shaderName, false, ShaderType::Compute), &newShader, csBlob) &&
+                IsCompatibleComputeShader(shaderName_, csBlob.Get()))
 			{
 				computeShaders[shaderName_] = newShader;
 				logger::info("Compile shader done : {}", shaderName);
@@ -243,24 +260,15 @@ namespace Mus {
 				return newShader;
 			}
 			logger::warn("Failed to compile shader for {}. so try to load latest compiled shader...", shaderName);
-			if (LoadCompiledComputeShader(device, GetShaderFilePath(shaderName, true, ShaderType::Compute), &newShader))
+			if (LoadCompiledComputeShader(device, GetShaderFilePath(shaderName, true, ShaderType::Compute), &newShader, csBlob) &&
+                IsCompatibleComputeShader(shaderName_, csBlob.Get()))
 			{
 				computeShaders[shaderName_] = newShader;
 				logger::info("Loaded latest compiled shader : {}", shaderName);
-				D3DReadFileToBlob(GetShaderFilePath(shaderName, true, ShaderType::Compute).c_str(), &csBlob);
 				csBlobs[shaderName_] = csBlob;
 				return newShader;
 			}
-			std::string FailedShaderCompile = "";
-			if (FailedShaderCompile.length() == 0)
-			{
-				FailedShaderCompile = "MuDynamicNormalMap - Warning!";
-				FailedShaderCompile += "\n\nFailed to Compile shader!";
-				FailedShaderCompile += "\nPlease update graphic driver";
-			}
-			else
-				FailedShaderCompile = ReplaceNewlineEscapes(FailedShaderCompile);
-			RE::DebugMessageBox(FailedShaderCompile.c_str());
+			RE::DebugMessageBox("Mu Dynamic NormalMap could not load the shader. See MuDynamicNormalMap.log for details.");
 			failedList.emplace(shaderName);
 			return nullptr;
 		}
@@ -290,16 +298,7 @@ namespace Mus {
 				vsBlobs[shaderName_] = vsBlob;
 				return newShader;
 			}
-			std::string FailedShaderCompile = "";
-			if (FailedShaderCompile.length() == 0)
-			{
-				FailedShaderCompile = "MuDynamicNormalMap - Warning!";
-				FailedShaderCompile += "\n\nFailed to Compile shader!";
-				FailedShaderCompile += "\nPlease update graphic driver";
-			}
-			else
-				FailedShaderCompile = ReplaceNewlineEscapes(FailedShaderCompile);
-			RE::DebugMessageBox(FailedShaderCompile.c_str());
+			RE::DebugMessageBox("Mu Dynamic NormalMap could not load the shader. See MuDynamicNormalMap.log for details.");
 			failedList.emplace(shaderName);
 			return nullptr;
 		}
@@ -329,16 +328,7 @@ namespace Mus {
 				psBlobs[shaderName_] = psBlob;
 				return newShader;
 			}
-			std::string FailedShaderCompile = "";
-			if (FailedShaderCompile.length() == 0)
-			{
-				FailedShaderCompile = "MuDynamicNormalMap - Warning!";
-				FailedShaderCompile += "\n\nFailed to Compile shader!";
-				FailedShaderCompile += "\nPlease update graphic driver";
-			}
-			else
-				FailedShaderCompile = ReplaceNewlineEscapes(FailedShaderCompile);
-			RE::DebugMessageBox(FailedShaderCompile.c_str());
+			RE::DebugMessageBox("Mu Dynamic NormalMap could not load the shader. See MuDynamicNormalMap.log for details.");
 			failedList.emplace(shaderName);
 			return nullptr;
 		}
@@ -561,14 +551,13 @@ namespace Mus {
 			}
 			return true;
 		}
-		bool ShaderManager::CreateDeviceContextWithSecondGPU()
+		void ShaderManager::CreateDeviceContextWithSecondGPU()
 		{
 			if (!CreateDeviceContextWithSecondGPUImpl())
 			{
 				secondDevice_.Reset();
 				secondContext_.Reset();
 			}
-			return true;
 		}
 		ID3D11DeviceContext* ShaderManager::GetSecondContext()
 		{
