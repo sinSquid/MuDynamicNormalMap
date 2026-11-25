@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -100,6 +101,15 @@ namespace Mus {
             bool Contains(int tile) const {
                 return (tile >= first && tile <= last) || tile <= wrappedLast;
             }
+            template <class Visit>
+            void VisitRanges(Visit&& visit) const {
+                // A wrap within one partial tile can put it in both ranges.
+                if (wrappedLast >= first - 1) visit(0, last);
+                else {
+                    visit(first, last);
+                    if (wrappedLast >= 0) visit(0, wrappedLast);
+                }
+            }
         };
         struct WideTriangle {
             std::uint32_t id;
@@ -110,7 +120,8 @@ namespace Mus {
         CPURasterTiles(int width, int height) :
             width(width), height(height), columns((width + RasterTileSize - 1) / RasterTileSize),
             wideRows((height + RasterTileSize - 1) / RasterTileSize),
-            bins(static_cast<std::size_t>(columns) * wideRows.size()) {}
+            bins(static_cast<std::size_t>(columns) * wideRows.size()),
+            activeBits((bins.size() + 63) / 64) {}
 
         void Add(RasterTriangle triangle) {
             const auto id = static_cast<std::uint32_t>(triangles.size());
@@ -120,25 +131,29 @@ namespace Mus {
             if (UsesWideRasterBins(triangle)) {
                 const auto rowFootprint = Footprint(triangle.top, triangle.bottom, height);
                 const auto columnFootprint = Footprint(triangle.left, triangle.right, width);
-                for (int row = 0; row < static_cast<int>(wideRows.size()); ++row)
-                    if (rowFootprint.Contains(row)) wideRows[row].push_back({id, columnFootprint});
+                rowFootprint.VisitRanges([&](int firstRow, int lastRow) {
+                    for (int row = firstRow; row <= lastRow; ++row) {
+                        wideRows[row].push_back({id, columnFootprint});
+                        columnFootprint.VisitRanges([&](int first, int last) {
+                            MarkActive(row * columns + first, row * columns + last);
+                        });
+                    }
+                });
                 return;
             }
             WalkAxis(triangle.top, triangle.bottom, height, [&](int row, int top, int bottom) {
                 WalkAxis(triangle.left, triangle.right, width, [&](int col, int left, int right) {
-                    bins[row * columns + col].push_back({id, left, top, right, bottom});
+                    const auto tile = row * columns + col;
+                    if (bins[tile].empty()) MarkActive(tile, tile);
+                    bins[tile].push_back({id, left, top, right, bottom});
                 });
             });
         }
 
-        std::size_t Size() const { return bins.size(); }
+        std::size_t ScheduledCount() const { return Dense() ? bins.size() : activeTiles.size(); }
+        std::size_t ScheduledTile(std::size_t index) const { return Dense() ? index : activeTiles[index]; }
         bool HasRegions(std::size_t tile) const {
-            if (!bins[tile].empty()) return true;
-            const int column = static_cast<int>(tile % columns);
-            const auto& row = wideRows[tile / columns];
-            return std::any_of(row.begin(), row.end(), [column](const auto& entry) {
-                return entry.columns.Contains(column);
-            });
+            return (activeBits[tile / 64] & (std::uint64_t{1} << (tile % 64))) != 0;
         }
         int TileX(std::size_t tile) const { return static_cast<int>(tile % columns) * RasterTileSize; }
         int TileY(std::size_t tile) const { return static_cast<int>(tile / columns) * RasterTileSize; }
@@ -160,6 +175,27 @@ namespace Mus {
         }
 
     private:
+        bool Dense() const { return activeCount >= (bins.size() + 1) / 2; }
+
+        void MarkActive(std::size_t first, std::size_t last) {
+            if (activeCount == bins.size()) return;
+            for (auto word = first / 64; word <= last / 64; ++word) {
+                const auto low = word == first / 64 ? first % 64 : 0;
+                const auto high = word == last / 64 ? last % 64 : 63;
+                const auto range = (~std::uint64_t{0} << low) & (~std::uint64_t{0} >> (63 - high));
+                auto added = range & ~activeBits[word];
+                if (!added) continue;
+                activeBits[word] |= range;
+                activeCount += std::popcount(added);
+                if (!Dense()) {
+                    while (added) {
+                        activeTiles.push_back(static_cast<std::uint32_t>(64 * word + std::countr_zero(added)));
+                        added &= added - 1;
+                    }
+                }
+            }
+        }
+
         // A wrapped interval covers at most two canonical ranges. A span of
         // one full period or more touches every tile, regardless of its start.
         static TileFootprint Footprint(int begin, int end, int extent) {
@@ -194,5 +230,8 @@ namespace Mus {
         std::vector<RasterTriangle> triangles;
         std::vector<std::vector<WideTriangle>> wideRows;
         std::vector<std::vector<RasterRegion>> bins;
+        std::vector<std::uint64_t> activeBits;
+        std::vector<std::uint32_t> activeTiles;
+        std::size_t activeCount = 0;
     };
 }

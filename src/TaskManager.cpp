@@ -329,6 +329,7 @@ namespace Mus {
             auto actor = GetFormByID<RE::Actor*>(id);
             if (IsInvalidActor(actor)) {
                 { std::unique_lock lock(isActiveActorsLock); isActiveActors.erase(id); }
+                PNS::ForgetInstalledLayer(id);
                 RemoveLastNormalMap(id);
                 geometryRetry.Forget(id);
                 continue;
@@ -637,7 +638,8 @@ namespace Mus {
                             material = PNS::PrivateNormalMaterial(id, geo);
                             if (!material) continue;
                         }
-                        if (Shader::TextureLoadManager::CreateSourceTexture(newSet.textureName, material->normalTexture) >= 0)
+                        if (Shader::TextureLoadManager::CreateSourceTexture(newSet.textureName, material->normalTexture) >= 0 &&
+                            !Config::GetSingleton().GetDebugTexture())
                             PNS::RetireInstalledGeometry(id, geo);
                     }
                 }
@@ -739,16 +741,25 @@ namespace Mus {
                 // Preserve the first matching result when a geometry appears twice.
                 using ResultIterator = decltype(textures.cbegin());
                 std::unordered_map<RE::BSGeometry*, ResultIterator> resultByGeometry;
-                if (textures.size() > 1) {
-                    resultByGeometry.reserve(textures.size());
-                    for (auto it = textures.cbegin(); it != textures.cend(); ++it)
-                        resultByGeometry.try_emplace(it->geometry, it);
+                std::unordered_map<bSlot, ResultIterator> overlayBySlot;
+                std::unordered_map<std::string, std::unordered_map<bSlot, std::vector<ResultIterator>>> fallbackByPath;
+                const bool applyOverlay = Config::GetSingleton().GetApplyOverlay();
+                if (textures.size() > 1) resultByGeometry.reserve(textures.size());
+                for (auto it = textures.cbegin(); it != textures.cend(); ++it) {
+                    if (textures.size() > 1) resultByGeometry.try_emplace(it->geometry, it);
+                    if (applyOverlay && !overlayBySlot.contains(it->slot) &&
+                        !IsContainString(it->geoName, "Vagina") && !IsContainString(it->geoName, "Anus") &&
+                        !IsContainString(it->geoName, "Canal"))
+                        overlayBySlot.emplace(it->slot, it);
+                    if (!it->texturePath.empty())
+                        fallbackByPath[lowLetter(it->texturePath)][it->slot].push_back(it);
                 }
                 // Serialize material installation and GPU composition with the renderer.
                 MaterialLock materialLock;
                 struct PreparedNormal {
                     RE::NiSourceTexturePtr texture;
                     RE::NiSourceTexturePtr restoreBase; // nonempty only for a composed pregnancy layer
+                    RE::NiSourceTexturePtr debugDiffuse;
                 };
                 std::unordered_map<std::string, PreparedNormal> createdTextures;
                 RE::BSVisit::TraverseScenegraphGeometries(root, [&](RE::BSGeometry* geo) -> RE::BSVisit::BSVisitControl {
@@ -761,7 +772,7 @@ namespace Mus {
                     auto found = textures.end();
                     if (IsContainString(geo->name.c_str(), "[Ovl") || IsContainString(geo->name.c_str(), "[SOvl") || IsContainString(geo->name.c_str(), "overlay"))
                     {
-                        if (!Config::GetSingleton().GetApplyOverlay())
+                        if (!applyOverlay)
                             return RE::BSVisit::BSVisitControl::kContinue;
 
                         bSlot slot = 0;
@@ -776,10 +787,8 @@ namespace Mus {
                         else
                             return RE::BSVisit::BSVisitControl::kContinue;
 
-                        found = std::find_if(textures.begin(), textures.end(), [&](const ObjectNormalMapUpdater::NormalMapResult& normalmap) {
-                            return normalmap.slot == slot &&
-                                   !IsContainString(normalmap.geoName, "Vagina") && !IsContainString(normalmap.geoName, "Anus") && !IsContainString(normalmap.geoName, "Canal");
-                        });
+                        if (auto it = overlayBySlot.find(slot); it != overlayBySlot.end())
+                            found = it->second;
                     }
                     else
                     {
@@ -810,31 +819,30 @@ namespace Mus {
                         if (dismember)
                         {
                             std::string texturePath = GetOriginalTexturePath(lowLetter(material->normalTexture->name.c_str()));
-                            found = std::find_if(textures.begin(), textures.end(), [&](const ObjectNormalMapUpdater::NormalMapResult& normalmap) {
-                                for (std::int32_t p = 0; p < dismember->GetRuntimeData().numPartitions; p++)
-                                {
-                                    bSlot slot;
-                                    auto pslot = dismember->GetRuntimeData().partitions[p].slot;
-                                    if (pslot < 30 || pslot >= RE::BIPED_OBJECT::kEditorTotal + 30)
-                                    {
-                                        if (geo->AsDynamicTriShape())
-                                        { // maybe head
-                                            slot = RE::BIPED_OBJECT::kHead;
-                                        }
-                                        else if (pslot == 0) // BP_TORSO
-                                        {
-                                            slot = RE::BIPED_OBJECT::kBody;
-                                        }
-                                        else // unknown slot
-                                            continue;
+                            const auto paths = fallbackByPath.find(lowLetter(texturePath));
+                            if (paths == fallbackByPath.end()) return RE::BSVisit::BSVisitControl::kContinue;
+                            const auto& partitions = dismember->GetRuntimeData();
+                            for (int p = 0; p < partitions.numPartitions; ++p) {
+                                const auto part = partitions.partitions[p].slot;
+                                bSlot slot;
+                                if (part >= 30 && part < RE::BIPED_OBJECT::kEditorTotal + 30)
+                                    slot = part - 30;
+                                else if (geo->AsDynamicTriShape())
+                                    slot = RE::BIPED_OBJECT::kHead;
+                                else if (part == 0)
+                                    slot = RE::BIPED_OBJECT::kBody;
+                                else continue;
+                                const auto candidates = paths->second.find(slot);
+                                if (candidates == paths->second.end()) continue;
+                                // Across partitions the earliest result in the original batch wins.
+                                for (auto it : candidates->second) {
+                                    if (it >= found) break;
+                                    if (!IsSameString(it->geoName, geo->name.c_str())) {
+                                        found = it;
+                                        break;
                                     }
-                                    else
-                                        slot = pslot - 30;
-                                    if (normalmap.slot == slot && IsSameString(normalmap.texturePath, texturePath) && !IsSameString(normalmap.geoName, geo->name.c_str()))
-                                        return true;
                                 }
-                                return false;
-                            });
+                            }
                         }
                         if (found == textures.end())
                             return RE::BSVisit::BSVisitControl::kContinue;
@@ -848,11 +856,13 @@ namespace Mus {
                         return RE::BSVisit::BSVisitControl::kContinue;
 
                     RE::NiSourceTexturePtr normalmap = nullptr;
-                    RE::NiSourceTexturePtr restoreBase;
+                    RE::NiSourceTexturePtr restoreBase, debugDiffuse;
+                    const bool debugOverride = Config::GetSingleton().GetDebugTexture();
                     if (auto texIt = createdTextures.find(found->textureName); texIt != createdTextures.end())
                     {
                         normalmap = texIt->second.texture;
                         restoreBase = texIt->second.restoreBase;
+                        debugDiffuse = texIt->second.debugDiffuse;
                     }
                     else
                     {
@@ -892,7 +902,14 @@ namespace Mus {
                             normalmap = std::move(privateOutput);
                             restoreBase = std::move(privateBase);
                         }
-                        createdTextures.emplace(found->textureName, PreparedNormal{normalmap, restoreBase});
+                        if (debugOverride) {
+                            // A named Mu wrapper may be rebound or released by a later update.
+                            // Use immutable resources for the independently owned debug channel.
+                            debugDiffuse = restoreBase ? normalmap :
+                                PNS::CreatePrivateNormalTexture(found->textureName, texture, view);
+                            if (!debugDiffuse) return RE::BSVisit::BSVisitControl::kContinue;
+                        }
+                        createdTextures.emplace(found->textureName, PreparedNormal{normalmap, restoreBase, debugDiffuse});
                         if (Config::GetSingleton().GetLogLevel() <= spdlog::level::level_enum::debug)
                         {
                             TextureLog(found->texture->normalmapTexture2D.Get());
@@ -900,7 +917,7 @@ namespace Mus {
                         }
                     }
 
-                    if (PNS::ModuleEnabled()) {
+                    if (PNS::ModuleEnabled() || debugOverride) {
                         // A shared skin material/property must not transmit this actor's layer.
                         material = PNS::PrivateNormalMaterial(a_actorID, geo);
                         if (!material) return RE::BSVisit::BSVisitControl::kContinue;
@@ -909,13 +926,12 @@ namespace Mus {
                     // this also recovers the original diffuse across repeated debug bakes.
                     PNS::RetireInstalledGeometry(a_actorID, geo);
                     auto originalDiffuse = material->diffuseTexture;
-                    const bool debugOverride = Config::GetSingleton().GetDebugTexture();
-                    if (debugOverride)
-                        material->diffuseTexture = normalmap;
+                    if (debugDiffuse)
+                        material->diffuseTexture = debugDiffuse;
                     material->normalTexture = normalmap;
-                    if (restoreBase)
+                    if (restoreBase || debugDiffuse)
                         PNS::RecordInstalledLayer(actor, geo, material, normalmap.get(), restoreBase.get(),
-                            debugOverride, originalDiffuse.get());
+                            debugDiffuse.get(), originalDiffuse.get());
 					ActorVertexHasher::GetSingleton().RegisterCheckTexture(actor, geo);
                     InsertLastNormalMap(a_actorID, found->slot, found->textureName);
                     logger::info("{:x}::{}::{} : update object normalmap done", a_actorID, a_actorName, geo->name.c_str());
@@ -1297,9 +1313,6 @@ namespace Mus {
                     auto* shader = netimmerse_cast<RE::BSLightingShaderProperty*>(
                         geometry->GetGeometryRuntimeData().shaderProperty.get());
                     auto* material = shader ? skyrim_cast<RE::BSLightingShaderMaterialBase*>(shader->material) : nullptr;
-                    // Ordinary Mu DebugTexture historically shares this named
-                    // wrapper with diffuse; do not turn it into a permanent pin.
-                    // Pregnancy debug diffuse is retired by its own ledger above.
                     if (material && referencesRetiringTexture(material->normalTexture)) return false;
                 }
                 RemoveLastNormalMap(actorID);
@@ -1420,11 +1433,14 @@ namespace Mus {
                             logger::warn("Some normalmaps are still being updated...");
                             return EventResult::kContinue;
                         }
+                        const bool debugWasEnabled = Config::GetSingleton().GetDebugTexture();
                         if (!Mus::Config::GetSingleton().LoadConfig()) {
                             RE::SendHUDMessage::ShowHUDMessage("MDNM : Reload failed; check configuration");
                             logger::error("Reload failed: invalid or unreadable configuration");
                             return EventResult::kContinue;
                         }
+                        if (debugWasEnabled && !Config::GetSingleton().GetDebugTexture())
+                            PNS::RestoreDisabledDebugLayers();
                         NormalMapStore::GetSingleton().Init();
                         InitialSetting();
                         actorWorkState->Clear();
@@ -1672,6 +1688,7 @@ namespace Mus {
                     it++;
                     continue;
                 }
+                PNS::ForgetInstalledLayer(it->first);
                 it = lastNormalMap.erase(it);
             }
             if (count != lastNormalMap.size())

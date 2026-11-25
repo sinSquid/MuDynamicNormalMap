@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Lifecycle.h"
+#include "Rendering/MuBridge.h"
 #include "Actor/ActorManager.h"
 #include "Actor/NormalMapApplicator.h"
 #include "Compat/BodyProviders.h"
@@ -22,6 +23,7 @@ namespace PNS {
             active.store(false);
             generation.fetch_add(1);
             if (initialized) ActorManager::GetSingleton().Clear();
+            else ClearInstalledLayers();
         }
 
         class InputHandler final : public RE::BSTEventSink<RE::InputEvent*> {
@@ -136,6 +138,7 @@ namespace PNS {
         if (active.exchange(false)) {
             generation.fetch_add(1);
             if (initialized) ActorManager::GetSingleton().Clear();
+            else ClearInstalledLayers();
         }
     }
 }

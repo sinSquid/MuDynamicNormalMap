@@ -211,6 +211,8 @@ namespace Mus {
             float detailStrength;
             UINT vertexEnd;
             UINT ownershipPass;
+            UINT parallelRaster;
+            UINT padding[3];
         };
         static_assert(sizeof(UpdateNormalMapBufferData) % 16 == 0, "Constant buffer must be 16-byte aligned.");
         Microsoft::WRL::ComPtr<ID3D11Buffer> updateNormalMapBuffer[2] = {nullptr, nullptr};
@@ -403,7 +405,8 @@ namespace Mus {
         };
 
 		bool IsDetailNormalMap(const std::string& a_normalMapPath);
-        void LoadCacheResource(RE::FormID a_actorID, GeometryDataPtr a_data, UpdateSet& a_updateSet, MergedTextureGeometries& mergedTextureGeometries, ResourceDatas& resourceDatas, UpdateResult& results, const std::string& generationSignature);
+        using GeometryIndex = std::unordered_map<RE::BSGeometry*, GeometryData::GeometriesInfo*>;
+        GeometryIndex LoadCacheResource(RE::FormID a_actorID, GeometryDataPtr a_data, UpdateSet& a_updateSet, MergedTextureGeometries& mergedTextureGeometries, ResourceDatas& resourceDatas, UpdateResult& results, const std::string& generationSignature);
 
 		DirectX::XMVECTOR SlerpVector(const DirectX::XMVECTOR& a, const DirectX::XMVECTOR& b, const float& t);
         bool CreateConstBuffer(ID3D11Device* device, UINT byteWidth, Microsoft::WRL::ComPtr<ID3D11Buffer>& bufferOut);

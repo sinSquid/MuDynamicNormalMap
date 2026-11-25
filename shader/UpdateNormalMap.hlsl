@@ -14,6 +14,7 @@ cbuffer ConstBuffer : register(b0)
     float detailStrength;
     uint vertexEnd;
     uint ownershipPass; // 0: claim pixels; 1: shade only the final owner.
+    uint parallelRaster;
 };
 
 StructuredBuffer<float3> vertices   : register(t0); // a_data->vertices
@@ -57,6 +58,15 @@ float3 SafeNormalize(float3 value, float3 fallback)
     return lengthSquared > 1e-12f && isfinite(lengthSquared) ? value * rsqrt(lengthSquared) : fallback;
 }
 
+// Assign a wrapped destination texel to a single lane of its triangle, even
+// when a non-power-of-two texture crosses a UV period inside the box.
+int FirstLaneCoordinate(int coordinate, uint size, uint stride, uint lane)
+{
+    uint local = WrapCoordinate(coordinate, size);
+    uint next = local + ((lane - local) & (stride - 1));
+    return coordinate - (int)local + (int)(next < size ? next : size + lane);
+}
+
 [numthreads(64, 1, 1)]
 void CSMain(uint3 threadID : SV_DispatchThreadID)
 {
@@ -94,30 +104,34 @@ void CSMain(uint3 threadID : SV_DispatchThreadID)
     float2 p0 = uv0 * float2(texWidth, texHeight);
     float2 p1 = uv1 * float2(texWidth, texHeight);
     float2 p2 = uv2 * float2(texWidth, texHeight);
+    // Match the host's zero-cost preflight case before any fused area math.
+    if (all(p0 == p1) || all(p1 == p2) || all(p2 == p0)) return;
 
-    float area = EdgeFunction(p0, p1, p2);
+    precise float area = EdgeFunction(p0, p1, p2);
     if (abs(area) < 1e-6)
         return;
 	float invArea = rcp(area);
 	bool isCCW = area > 0.0f;
 
-    float minX = floor(min(min(p0.x, p1.x), p2.x));
-    float minY = floor(min(min(p0.y, p1.y), p2.y));
-    float maxX = ceil(max(max(p0.x, p1.x), p2.x));
-    float maxY = ceil(max(max(p0.y, p1.y), p2.y));
-
     float2 minBB = min(p0, min(p1, p2));
     float2 maxBB = max(p0, max(p1, p2));
     int2 minP = (int2)floor(minBB);
     int2 maxP = (int2)ceil(maxBB);
-    if (any((maxP - minP) >= int2(texWidth * 2, texHeight * 2)))
-        return;
+    uint2 extent = uint2(maxP - minP + 1);
+    // Host preflight caps every box and their total before either dispatch.
+    bool split = parallelRaster != 0 && extent.x * extent.y > 32768;
+    uint sx = split && texWidth >= 8 ? 8 : 1;
+    uint sy = split && texHeight >= 8 ? 8 : 1;
+    if (threadID.y >= sx * sy) return;
+    uint lx = threadID.y % sx, ly = threadID.y / sx;
 
     float2 invTexSize = rcp(float2(texWidth, texHeight));
 
-    for (int y = minP.y; y <= maxP.y; y++)
+    for (int y = split ? FirstLaneCoordinate(minP.y, texHeight, sy, ly) : minP.y;
+         y <= maxP.y; y = split ? FirstLaneCoordinate(y + 1, texHeight, sy, ly) : y + 1)
     {
-        for (int x = minP.x; x <= maxP.x; x++)
+        for (int x = split ? FirstLaneCoordinate(minP.x, texWidth, sx, lx) : minP.x;
+             x <= maxP.x; x = split ? FirstLaneCoordinate(x + 1, texWidth, sx, lx) : x + 1)
         {
             float2 xy = float2((float)x, (float)y);
             float2 p = xy + float2(0.5f, 0.5f);

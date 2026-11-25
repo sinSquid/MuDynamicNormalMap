@@ -30,7 +30,7 @@ struct UVTriangle {
     DirectX::XMFLOAT2 a, b, c;
 };
 
-void CompareRaster(int width, int height, const std::vector<UVTriangle>& input)
+std::uint64_t CompareRaster(int width, int height, const std::vector<UVTriangle>& input)
 {
     CPURasterTiles tiles(width, height);
     std::vector<Pixel> expected(width * height), actual(width * height);
@@ -57,7 +57,12 @@ void CompareRaster(int width, int height, const std::vector<UVTriangle>& input)
             tiles.Add(projected);
     }
 
-    for (std::size_t tile = 0; tile < tiles.Size(); ++tile) {
+    std::uint64_t skippedCoverage = 0;
+    std::vector<bool> scheduled(((width + 31) / 32) * ((height + 31) / 32));
+    for (std::size_t position = 0; position < tiles.ScheduledCount(); ++position) {
+        const auto tile = tiles.ScheduledTile(position);
+        assert(tile < scheduled.size() && !scheduled[tile]);
+        scheduled[tile] = true;
         if (!tiles.HasRegions(tile)) continue;
         const auto tileX = tiles.TileX(tile), tileY = tiles.TileY(tile);
         std::array<unsigned, RasterTileSize * RasterTileSize> owners{};
@@ -65,22 +70,27 @@ void CompareRaster(int width, int height, const std::vector<UVTriangle>& input)
             tiles.VisitRegions(tile, [&](const auto& triangle, const auto& region) {
                 for (int y = region.top; y < region.bottom; ++y) {
                     for (int x = region.left; x < region.right; ++x) {
-                        DirectX::XMFLOAT3 bary;
-                        if (!triangle.Covers(x + .5f, y + .5f, bary)) continue;
                         const auto wx = WrapTextureCoordinate(x, width);
                         const auto wy = WrapTextureCoordinate(y, height);
                         assert(wx >= tileX && wx < tileX + RasterTileSize);
                         assert(wy >= tileY && wy < tileY + RasterTileSize);
                         auto& owner = owners[(wy - tileY) * RasterTileSize + wx - tileX];
                         const auto priority = triangle.index / 3 + 1;
+                        if (shade && owner != priority) {
+                            ++skippedCoverage;
+                            continue;
+                        }
+                        DirectX::XMFLOAT3 bary;
+                        if (!triangle.Covers(x + .5f, y + .5f, bary)) continue;
                         if (!shade) owner = std::max(owner, priority);
-                        else if (owner == priority) actual[wy * width + wx] = {owner, x, y};
+                        else actual[wy * width + wx] = {owner, x, y};
                     }
                 }
             });
         }
     }
     assert(actual == expected);
+    return skippedCoverage;
 }
 
 int main()
@@ -108,15 +118,31 @@ int main()
         {.5f / extent, -500.f / extent}, {-500.f / extent, .5f / extent}, extent, extent, 0));
     CPURasterTiles sparse(extent, extent);
     sparse.Add(wide);
+    sparse.Add(wide);
     std::size_t active = 0;
-    for (std::size_t tile = 0; tile < sparse.Size(); ++tile) {
+    assert(sparse.ScheduledCount() == 289);
+    std::vector<bool> scheduled(512 * 512);
+    for (std::size_t position = 0; position < sparse.ScheduledCount(); ++position) {
+        const auto tile = sparse.ScheduledTile(position);
+        assert(tile < scheduled.size() && !scheduled[tile]);
+        scheduled[tile] = true;
         bool visited = false;
         if (sparse.HasRegions(tile))
             sparse.VisitRegions(tile, [&](const auto&, const auto&) { visited = true; });
         assert(visited == sparse.HasRegions(tile));
         active += visited;
     }
-    assert(active == 17 * 17 && active < sparse.Size());
+    assert(active == 17 * 17);
+
+    const UVTriangle full{{0, 0}, {1, 0}, {0, 1}};
+    const auto skipped = CompareRaster(128, 128, {full, full});
+    assert(skipped >= 128 * 128);
+    CPURasterTiles dense(256, 256);
+    assert(ProjectRasterTriangle(wide, full.a, full.b, full.c, 256, 256, 0));
+    dense.Add(wide);
+    assert(dense.ScheduledCount() == 64);
+    for (std::size_t i = 0; i < dense.ScheduledCount(); ++i)
+        assert(dense.ScheduledTile(i) == i && dense.HasRegions(i));
 
     RasterTriangle ignored{};
     assert(!ProjectRasterTriangle(ignored, {std::numeric_limits<float>::quiet_NaN(), 0}, {0, 0}, {1, 1}, 64, 64, 0));
@@ -159,5 +185,6 @@ int main()
     assert(ReserveRasterSamples(repeated, 64, 64, geometry, batch));
     assert(!ReserveRasterSamples(repeated, 64, 64, geometry, batch));
     assert(geometry == cost && batch == 0);
-    std::cout << "PASS multi-period UV, sparse tiles, geometry/batch budgets and extreme input\n";
+    std::cout << "PASS: sparse scheduled=289/262144, dense sequential, overlap coverage calls avoided="
+              << skipped << ", multi-period UV, geometry/batch budgets and extreme input\n";
 }

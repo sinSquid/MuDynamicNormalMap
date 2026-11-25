@@ -229,15 +229,18 @@ namespace Mus {
             if (name != "updatenormalmap") return true;
             Microsoft::WRL::ComPtr<ID3D11ShaderReflection> reflection;
             D3D11_SHADER_INPUT_BIND_DESC owner{};
+            D3D11_SHADER_VARIABLE_DESC parallel{};
             if (bytecode &&
                 SUCCEEDED(D3DReflect(bytecode->GetBufferPointer(), bytecode->GetBufferSize(),
                     __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()))) &&
                 SUCCEEDED(reflection->GetResourceBindingDescByName("pixelOwner", &owner)) &&
                 owner.Type == D3D_SIT_UAV_RWTYPED && owner.BindPoint == 1 &&
-                owner.ReturnType == D3D_RETURN_TYPE_UINT && owner.Dimension == D3D_SRV_DIMENSION_TEXTURE2D) {
+                owner.ReturnType == D3D_RETURN_TYPE_UINT && owner.Dimension == D3D_SRV_DIMENSION_TEXTURE2D &&
+                SUCCEEDED(reflection->GetConstantBufferByName("ConstBuffer")->GetVariableByName("parallelRaster")->GetDesc(&parallel)) &&
+                parallel.StartOffset == 48 && parallel.Size == sizeof(UINT) && (parallel.uFlags & D3D_SVF_USED)) {
                 return true;
             }
-            logger::error("UpdateNormalMap shader is missing the pixel ownership UAV. Install the HLSL and CSO from this build.");
+            logger::error("UpdateNormalMap shader has an incompatible raster interface. Install the HLSL and CSO from this build.");
             return false;
         }
 

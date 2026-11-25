@@ -1,3 +1,4 @@
+#define NOMINMAX
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
@@ -10,11 +11,51 @@
 #include <random>
 #include <stdexcept>
 #include <vector>
+#include "../include/GPURasterBudget.h"
 using Microsoft::WRL::ComPtr;
 static void Check(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 static void HR(HRESULT hr){Check(SUCCEEDED(hr),"D3D11 failed");}
 struct V3{float x,y,z;};struct V2{float x,y;};
 int main(){
+    const DirectX::XMFLOAT2 zeroUV{0, 0}, u{3, 0}, v{0, 3};
+    {
+        auto budget = Mus::RasterGeometrySampleLimit(256, 256), batch = Mus::RasterBatchSampleLimit;
+        const auto before = budget;
+        bool parallel = false;
+        const DirectX::XMFLOAT2 farUV{2048, 2048};
+        Check(Mus::ReserveGPURasterSamples(zeroUV, farUV, farUV, 256, 256, budget, batch, parallel),
+            "degenerate UV rejected the entire geometry batch");
+        Check(!parallel && budget == before && batch == Mus::RasterBatchSampleLimit,
+            "degenerate UV charged pixel-loop work");
+        Check(Mus::ReserveGPURasterSamples({-2048,-2048}, zeroUV, farUV, 256, 256, budget, batch, parallel),
+            "distinct collinear vertices rejected the batch");
+        Check(!parallel && budget == before && batch == Mus::RasterBatchSampleLimit,
+            "collinear UV consumed the next triangle's budget");
+        Check(Mus::ReserveGPURasterSamples(zeroUV, u, v, 256, 256, budget, batch, parallel) && budget < before,
+            "valid triangle following a collinear triangle failed");
+    }
+    for (unsigned size : {2048, 4096}) {
+        auto budget = Mus::RasterGeometrySampleLimit(size, size), batch = Mus::RasterBatchSampleLimit;
+        bool parallel = false;
+        Check(Mus::ReserveGPURasterSamples(zeroUV, u, v, size, size, budget, batch, parallel) && parallel,
+            "common 3x3 UV unexpectedly rejected");
+    }
+    {
+        auto budget = Mus::RasterGeometrySampleLimit(256, 256), batch = Mus::RasterBatchSampleLimit;
+        const auto before = budget;
+        bool parallel = false;
+        Check(!Mus::ReserveGPURasterSamples({-65504, 0}, {65504, 0}, {0, 65504}, 256, 256, budget, batch, parallel),
+            "extreme UV accepted");
+        Check(budget == before && batch == Mus::RasterBatchSampleLimit, "rejected UV consumed budget");
+    }
+    {
+        auto budget = Mus::RasterGeometrySampleLimit(5, 3), batch = Mus::RasterBatchSampleLimit;
+        const auto before = budget;
+        bool parallel = false;
+        Check(!Mus::ReserveGPURasterSamples({0, 0}, {1024, 0}, {0, 512}, 5, 3, budget, batch, parallel),
+            "tiny texture allowed excessive work on one shader lane");
+        Check(!parallel && budget == before && batch == Mus::RasterBatchSampleLimit, "lane rejection consumed budget");
+    }
     ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
     HR(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context));
     ComPtr<ID3DBlob> code,error;
@@ -22,11 +63,11 @@ int main(){
     if(FAILED(hr)&&error)std::cerr<<static_cast<const char*>(error->GetBufferPointer());HR(hr);
     ComPtr<ID3D11ComputeShader> shader;HR(device->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&shader));
     std::mt19937 random(71);unsigned runs=0;
-    for(const auto dims:{std::pair{5u,3u},std::pair{64u,32u}})for(float shift:{-1.f,0.f,1.f}){
+    for(const auto dims:{std::pair{5u,3u},std::pair{64u,32u},std::pair{67u,61u}})for(float shift:{-1.f,0.f,1.f}){
         const auto [width,height]=dims;
         std::array<V3,8> zero{};
         std::array<V3,8> normals{{{0,0,1},{0,0,1},{0,0,1},{0,0,1},{1,0,0},{1,0,0},{1,0,0},{1,0,0}}};
-        std::array<V2,8> uvs{{{0,0},{1,0},{1,1},{0,1},{shift,0},{1+shift,0},{1+shift,1},{shift,1}}};
+        std::array<V2,8> uvs{{{0,0},{1,0},{1,1},{0,1},{shift,shift},{3+shift,shift},{3+shift,3+shift},{shift,3+shift}}};
         // Leading degenerate triangle ensures nonzero indicesStart in every run.
         std::array<unsigned,15> indices{0,0,0,0,1,2,0,2,3,4,5,6,4,6,7};
         std::array<ComPtr<ID3D11Buffer>,6> buffers;std::array<ComPtr<ID3D11ShaderResourceView>,6> views;
@@ -38,8 +79,9 @@ int main(){
             D3D11_SHADER_RESOURCE_VIEW_DESC srv{};srv.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;srv.Buffer.NumElements=count;
             HR(device->CreateShaderResourceView(buffers[slot].Get(),&srv,&views[slot]));
         }
-        std::array<unsigned,12> constants{width,height,3,15,0,0,0,0,0,0,8,0};
-        D3D11_BUFFER_DESC cb{};cb.ByteWidth=48;cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        std::array<unsigned,16> constants{width,height,3,15,0,0,0,0,0,0,8,0};
+        constants[12] = (3 * width + 1) * (3 * height + 1) > 32768;
+        D3D11_BUFFER_DESC cb{};cb.ByteWidth=sizeof(constants);cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         ComPtr<ID3D11Buffer> constant;HR(device->CreateBuffer(&cb,nullptr,&constant));
         D3D11_TEXTURE2D_DESC td{};td.Width=width;td.Height=height;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;td.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
         ComPtr<ID3D11Texture2D> output,owner,read;ComPtr<ID3D11UnorderedAccessView> colorUAV,ownerUAV;
@@ -76,7 +118,7 @@ int main(){
                 for (unsigned pass = 0; pass < 2; ++pass) {
                     constants[11] = pass;
                     context->UpdateSubresource(constant.Get(), 0, nullptr, constants.data(), 0, 0);
-                    context->Dispatch(1, 1, 1);
+                    context->Dispatch(1, constants[12] ? 64 : 1, 1);
                 }
                 ID3D11UnorderedAccessView* none[2]{};
                 context->CSSetUnorderedAccessViews(0, 2, none, nullptr);
@@ -110,7 +152,7 @@ int main(){
                     chunks={{3,6},{6,9},{9,12},{12,15}};
                     std::shuffle(chunks.begin(),chunks.end(),random);
                 }
-                for(const auto& [begin,end]:chunks){constants[2]=begin;constants[3]=end;context->UpdateSubresource(constant.Get(),0,nullptr,constants.data(),0,0);context->Dispatch(1,1,1);}
+                for(const auto& [begin,end]:chunks){constants[2]=begin;constants[3]=end;context->UpdateSubresource(constant.Get(),0,nullptr,constants.data(),0,0);context->Dispatch(1,constants[12] ? 64 : 1,1);}
                 // Trial zero diagnoses the claim phase. All other trials match
                 // production: no intermediate readback/Map/CPU completion wait.
                 if(pass==0 && trial==0){
@@ -131,5 +173,5 @@ int main(){
             ++runs;
         }
     }
-    std::cout<<"PASS: "<<runs<<" WARP overlap runs and six consecutive owner-reuse cases without intermediate readback\n";
+    std::cout<<"PASS: "<<runs<<" WARP multi-period overlap runs, rotated submission order and owner reuse\n";
 }

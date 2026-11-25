@@ -19,10 +19,13 @@ namespace PNS {
 
         if (!event || !ModuleEnabled() || !SessionActive()) return RE::BSEventNotifyControl::kContinue;
 
-        // Only care about loaded objects (not unloaded)
         if (!event->loaded) {
             // Actor unloaded — remove from tracking
-            QueueSessionTask([id=event->formID] { ActorManager::GetSingleton().RemoveActor(id); });
+            QueueSessionTask([id=event->formID] {
+                // The same actor can reload before this deferred unload callback.
+                auto* actor = RE::TESForm::LookupByID<RE::Actor>(id);
+                if (!actor || !actor->Is3DLoaded()) ActorManager::GetSingleton().RemoveActor(id);
+            });
             return RE::BSEventNotifyControl::kContinue;
         }
 

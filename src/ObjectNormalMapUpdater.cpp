@@ -2,6 +2,7 @@
 #include "TextureRowSlices.h"
 #include "NormalMath.h"
 #include "CPURasterTiles.h"
+#include "GPURasterBudget.h"
 #include <array>
 #include <bit>
 #include "FutureBatch.h"
@@ -215,11 +216,11 @@ namespace Mus {
 		return true;
 	}
 
-	void ObjectNormalMapUpdater::LoadCacheResource(RE::FormID a_actorID, GeometryDataPtr a_data, UpdateSet& a_updateSet, MergedTextureGeometries& mergedTextureGeometries, ResourceDatas& resourceDatas, UpdateResult& results, const std::string& generationSignature)
+	ObjectNormalMapUpdater::GeometryIndex ObjectNormalMapUpdater::LoadCacheResource(RE::FormID a_actorID, GeometryDataPtr a_data, UpdateSet& a_updateSet, MergedTextureGeometries& mergedTextureGeometries, ResourceDatas& resourceDatas, UpdateResult& results, const std::string& generationSignature)
 	{
-        // Geometry storage stays fixed throughout this call. Retain the first
+        // Geometry storage stays fixed throughout this batch. Retain the first
         // duplicate identity, exactly as the previous find_if lookups did.
-        std::unordered_map<RE::BSGeometry*, GeometryData::GeometriesInfo*> geometryByIdentity;
+        GeometryIndex geometryByIdentity;
         geometryByIdentity.reserve(a_data->geometries.size());
         for (auto& geometry : a_data->geometries)
             geometryByIdentity.try_emplace(geometry.geometry, &geometry);
@@ -405,6 +406,7 @@ namespace Mus {
 			mergedTextureGeometries.insert(it->first);
             it = a_updateSet.erase(it);
 		}
+        return geometryByIdentity;
 	}
 
 	bool ObjectNormalMapUpdater::CreateGeometryResourceData(RE::FormID a_actorID, GeometryDataPtr a_data)
@@ -498,23 +500,16 @@ namespace Mus {
         const auto compression = SelectTextureCompression(tuning->TextureCompress, tuning->TextureCompressQuality,
             sl.IsSecondGPU(), isImmediately.load());
         const auto generationSignature = RuntimeGenerationSignature(*tuning, false, compression);
-		LoadCacheResource(a_actorID, a_data, a_updateSet, mergedTextureGeometries, resourceDatas, results, generationSignature);
+        const auto geometryByIdentity = LoadCacheResource(a_actorID, a_data, a_updateSet, mergedTextureGeometries, resourceDatas, results, generationSignature);
 
         const bool tangentZCorrection = Config::GetSingleton().GetTangentZCorrection();
 
         std::uint64_t batchSamples = RasterBatchSampleLimit;
         for (const auto& update : a_updateSet)
         {
-            auto found = std::find_if(a_data->geometries.cbegin(), a_data->geometries.cend(), [&](const GeometryData::GeometriesInfo& geosInfo) {
-                return geosInfo.geometry == update.first;
-            });
-            if (found == a_data->geometries.cend())
-            {
-                logger::error("{}::{:x} : Geometry {} not found in data", _func_, a_actorID, update.second.geometryName);
-                continue;
-            }
-            const GeometryData::ObjectInfo& objInfo = found->objInfo;
-            const auto hash = found->hash;
+            const auto& geometry = *geometryByIdentity.at(update.first);
+            const auto& objInfo = geometry.objInfo;
+            const auto hash = geometry.hash;
 
             if (Config::GetSingleton().GetUpdateNormalMapTime1())
                 PerformanceLog(std::string(_func_) + "::" + GetHexStr(a_actorID) + "::" + update.second.geometryName, false, false);
@@ -698,8 +693,9 @@ namespace Mus {
             // Each worker owns all writes to a canonical tile, including UVs
             // that wrap to it from another period.
             tp->Execute([&] {
-                tbb::parallel_for(tbb::blocked_range<std::size_t>(0, tiles.Size()), [&](const auto& range) {
-                    for (auto tile = range.begin(); tile != range.end(); ++tile) {
+                tbb::parallel_for(tbb::blocked_range<std::size_t>(0, tiles.ScheduledCount()), [&](const auto& range) {
+                    for (auto position = range.begin(); position != range.end(); ++position) {
+                        const auto tile = tiles.ScheduledTile(position);
                         if (!tiles.HasRegions(tile)) continue;
                         const auto tileX = tiles.TileX(tile), tileY = tiles.TileY(tile);
                         std::array<std::uint32_t, RasterTileSize * RasterTileSize> owners{};
@@ -766,12 +762,11 @@ namespace Mus {
                                 std::uint8_t* rowData = dstData + wrapY * dstmg.GetRowPitch();
                                 for (std::int32_t x = region.left; x < region.right; x++)
                                 {
-                                    DirectX::XMFLOAT3 bary;
-                                    if (!triangle.Covers(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f, bary))
-                                        continue;
-
                                     const std::uint32_t wrapX = WrapTextureCoordinate(x, width);
                                     if (owners[(wrapY - tileY) * RasterTileSize + (wrapX - tileX)] != index / 3 + 1)
+                                        continue;
+                                    DirectX::XMFLOAT3 bary;
+                                    if (!triangle.Covers(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f, bary))
                                         continue;
                                     const float mX = static_cast<const float>(wrapX) * invWidth;
 
@@ -921,7 +916,7 @@ namespace Mus {
         const auto compression = SelectTextureCompression(tuning->TextureCompress, tuning->TextureCompressQuality,
             sl.IsSecondGPU(), isImmediately.load());
         const auto generationSignature = RuntimeGenerationSignature(*tuning, true, compression);
-		LoadCacheResource(a_actorID, a_data, a_updateSet, mergedTextureGeometries, resourceDatas, results, generationSignature);
+        const auto geometryByIdentity = LoadCacheResource(a_actorID, a_data, a_updateSet, mergedTextureGeometries, resourceDatas, results, generationSignature);
 
         // Cached normal maps need no geometry uploads. CPU processing above remains
         // unchanged because it supplies the geometry hashes used by cache lookup.
@@ -938,18 +933,12 @@ namespace Mus {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> pixelOwnerTexture;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> pixelOwnerUAV;
         UINT ownerWidth = 0, ownerHeight = 0;
+        std::uint64_t gpuBatchSamples = RasterBatchSampleLimit;
         for (const auto& update : a_updateSet)
         {
-            const auto found = std::find_if(a_data->geometries.cbegin(), a_data->geometries.cend(), [&](const GeometryData::GeometriesInfo& geosInfo) {
-                return geosInfo.geometry == update.first;
-            });
-            if (found == a_data->geometries.cend())
-            {
-                logger::error("{}::{:x} : Geometry {} not found in data", _func_, a_actorID, update.second.geometryName);
-                continue;
-            }
-            const GeometryData::ObjectInfo& objInfo = found->objInfo;
-            const auto hash = found->hash;
+            const auto& geometry = *geometryByIdentity.at(update.first);
+            const auto& objInfo = geometry.objInfo;
+            const auto hash = geometry.hash;
 
             if (Config::GetSingleton().GetUpdateNormalMapTime1())
                 PerformanceLog(std::string(_func_) + "::" + GetHexStr(a_actorID) + "::" + update.second.geometryName, false, false);
@@ -1017,6 +1006,17 @@ namespace Mus {
                 ? std::bit_width(std::max(dstDesc.Width, dstDesc.Height)) : 1;
 
             Microsoft::WRL::ComPtr<ID3D11Texture2D> dstTexture2D = nullptr;
+            auto gpuGeometrySamples = RasterGeometrySampleLimit(dstDesc.Width, dstDesc.Height);
+            bool largeTriangle = false;
+            for (auto index = objInfo.indicesStart; index < objInfo.indicesEnd; index += 3) {
+                const auto i0 = a_data->indices[index], i1 = a_data->indices[index + 1], i2 = a_data->indices[index + 2];
+                if (i0 >= a_data->uvs.size() || i1 >= a_data->uvs.size() || i2 >= a_data->uvs.size() ||
+                    !ReserveGPURasterSamples(a_data->uvs[i0], a_data->uvs[i1], a_data->uvs[i2],
+                        dstDesc.Width, dstDesc.Height, gpuGeometrySamples, gpuBatchSamples, largeTriangle)) {
+                    logger::warn("{}::{:x}::{} : unsupported UV or GPU raster budget exceeded", _func_, a_actorID, update.second.geometryName);
+                    return {};
+                }
+            }
             hr = device->CreateTexture2D(&dstDesc, nullptr, &dstTexture2D);
             if (FAILED(hr))
             {
@@ -1095,6 +1095,7 @@ namespace Mus {
             cbData.tangentZCorrection = tangentZCorrection ? 1 : 0;
             cbData.detailStrength = update.second.detailStrength;
             cbData.vertexEnd = a_data->vertices.size();
+            cbData.parallelRaster = largeTriangle;
             
             const std::uint32_t totalTris = objInfo.indicesCount() / 3;
             if (totalTris == 0) continue;
@@ -1144,7 +1145,7 @@ namespace Mus {
                             context->CSSetUnorderedAccessViews(0, 1, dstUnorderedAccessView.GetAddressOf(), nullptr);
                             context->CSSetUnorderedAccessViews(1, 1, pixelOwnerUAV.GetAddressOf(), nullptr);
                             context->CSSetSamplers(0, 1, samplerState[isSecondGPUEnabled].GetAddressOf());
-                            context->Dispatch(dispatch, 1, 1);
+                            context->Dispatch(dispatch, largeTriangle ? 64 : 1, 1);
                         }
                     }
 
@@ -1203,7 +1204,7 @@ namespace Mus {
                                     context->CSSetUnorderedAccessViews(0, 1, dstUnorderedAccessView.GetAddressOf(), nullptr);
                                     context->CSSetUnorderedAccessViews(1, 1, pixelOwnerUAV.GetAddressOf(), nullptr);
                                     context->CSSetSamplers(0, 1, samplerState[isSecondGPUEnabled].GetAddressOf());
-                                    context->Dispatch(dispatch, 1, 1);
+                                    context->Dispatch(dispatch, largeTriangle ? 64 : 1, 1);
                                 }
                             }
 

@@ -98,8 +98,8 @@ static void TestShader(ID3D11Device* device, ID3D11DeviceContext* context) {
         D3D11_SHADER_RESOURCE_VIEW_DESC srv{};srv.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;srv.Buffer.NumElements=count;
         HR(device->CreateShaderResourceView(buffers[i].Get(),&srv,&views[i]));
     }
-    std::array<unsigned,12> constants{5,3,0,6,0,0,0,0,0,0,4,0};
-    D3D11_BUFFER_DESC cb{};cb.ByteWidth=48;cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+    std::array<unsigned,16> constants{5,3,0,6,0,0,0,0,0,0,4,0};
+    D3D11_BUFFER_DESC cb{};cb.ByteWidth=sizeof(constants);cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     D3D11_SUBRESOURCE_DATA initial{constants.data(),0,0};ComPtr<ID3D11Buffer> constant;HR(device->CreateBuffer(&cb,&initial,&constant));
     D3D11_TEXTURE2D_DESC td{};td.Width=5;td.Height=3;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
     td.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;td.BindFlags=D3D11_BIND_UNORDERED_ACCESS;

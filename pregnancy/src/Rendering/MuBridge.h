@@ -14,6 +14,7 @@ namespace PNS {
     bool RetireInstalledGeometry(RE::FormID actorID, RE::BSGeometry* geometry);
     bool RestoreInstalledLayer(RE::Actor* actor);
     RE::NiSourceTexturePtr ResolveRestoredBase(RE::NiSourceTexture* savedBase);
+    void RestoreDisabledDebugLayers();
     void ForgetInstalledLayer(RE::FormID actorID);
     void ClearInstalledLayers();
     void PruneInstalledLayers(RE::FormID actorID, const std::unordered_set<RE::BSGeometry*>& live);
@@ -22,7 +23,7 @@ namespace PNS {
         RE::BSLightingShaderMaterialBase* source, RE::BSLightingShaderMaterialBase* replacement);
     void RecordInstalledLayer(RE::Actor* actor, RE::BSGeometry* geometry,
         RE::BSLightingShaderMaterialBase* material, RE::NiSourceTexture* installed,
-        RE::NiSourceTexture* base, bool debugOverride, RE::NiSourceTexture* originalDiffuse);
+        RE::NiSourceTexture* base, RE::NiSourceTexture* debugDiffuse, RE::NiSourceTexture* originalDiffuse);
     RE::NiSourceTexturePtr CreatePrivateNormalTexture(const std::string& sourceName,
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture,
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view);

@@ -13,9 +13,10 @@ old = subprocess.check_output(["git", "show", f"{baseline}:src/ObjectNormalMapUp
 new = (root / "src/ObjectNormalMapUpdater.cpp").read_text(encoding="utf-8-sig")
 
 def body(source, name):
-    start = source.index("void ObjectNormalMapUpdater::LoadCacheResource(")
+    start = source.rindex("\n", 0, source.index("ObjectNormalMapUpdater::LoadCacheResource(")) + 1
     end = source.index("bool ObjectNormalMapUpdater::CreateGeometryResourceData", start)
-    extracted = source[start:end].replace("ObjectNormalMapUpdater::LoadCacheResource", name, 1)
+    extracted = source[start:end].replace("ObjectNormalMapUpdater::GeometryIndex", "GeometryIndex", 1)
+    extracted = extracted.replace("ObjectNormalMapUpdater::LoadCacheResource", name, 1)
     # Signature construction is tested separately. Preserve the same deterministic
     # hash service for old two-argument and new batch-signature call sites.
     return extracted.replace("const std::string& generationSignature)",
@@ -48,6 +49,7 @@ struct GeometryData {
     std::vector<GeometriesInfo> geometries;
 };
 using GeometryDataPtr = std::shared_ptr<GeometryData>;
+using GeometryIndex = std::unordered_map<RE::BSGeometry*, GeometryData::GeometriesInfo*>;
 struct UpdateTextureSet {
     unsigned slot;
     std::string geometryName, textureName, srcTexturePath, detailTexturePath;
@@ -153,7 +155,13 @@ int main() {
         Baseline(7, a, ua, ma, da, ra);
         const auto calls = store.calls;
         store.calls.clear();
-        Optimized(7, b, ub, mb, db, rb);
+        const auto geometryIndex = Optimized(7, b, ub, mb, db, rb);
+        for (const auto& update : ub) {
+            const auto first = std::find_if(b->geometries.begin(), b->geometries.end(),
+                [&](const auto& geometry) { return geometry.geometry == update.first; });
+            Check(first != b->geometries.end() && geometryIndex.at(update.first) == &*first,
+                "remaining generation uses first geometry identity", seed);
+        }
         Check(ua == ub, "remaining updates/order", seed);
         Check(ra == rb, "cache results/order/aliases", seed);
         Check(ma == mb, "merged geometries", seed);

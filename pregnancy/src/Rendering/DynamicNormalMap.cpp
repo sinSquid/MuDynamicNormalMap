@@ -89,7 +89,7 @@ namespace PNS {
 
 
     RE::BSLightingShaderMaterialBase* PrivateNormalMaterial(RE::FormID actorID, RE::BSGeometry* geometry) {
-        if (!geometry || !ModuleEnabled() || !SessionActive()) return nullptr;
+        if (!geometry || !SessionActive()) return nullptr;
         RendererLock lock;
         auto& runtime = geometry->GetGeometryRuntimeData();
         auto* source = netimmerse_cast<RE::BSLightingShaderProperty*>(runtime.shaderProperty.get());

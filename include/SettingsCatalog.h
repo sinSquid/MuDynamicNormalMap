@@ -340,7 +340,7 @@ namespace Mus {
         // CPU and GPU generation intentionally use different interpolation and
         // sampling paths. Restart-only settings are normally omitted below, but
         // the selected backend is part of the generated texture's identity.
-        std::string signature = std::string("MuGenerationV5;GPUEnable=") + (gpuGeneration ? "1;" : "0;");
+        std::string signature = gpuGeneration ? "MuGenerationV6;GPUEnable=1;" : "MuGenerationV5;GPUEnable=0;";
         for (const auto& setting : GetSettingsCatalog()) {
             if (setting.policy != ApplyPolicy::Regenerate) continue;
             signature += setting.section; signature += '/'; signature += setting.key;
